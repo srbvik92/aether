@@ -23,7 +23,9 @@ jobs:
         run: npm ci
 
       - name: Rebuild native modules for Node.js
-        run: npm rebuild better-sqlite3 --build-from-source || true
+        run: |
+          rm -rf node_modules/better-sqlite3/build
+          npm rebuild better-sqlite3 --build-from-source || true
 
       - name: TypeScript check
         run: npx tsc --noEmit
