@@ -13,6 +13,9 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write   # required to create GitHub Releases and upload assets
+
     strategy:
       fail-fast: false
       matrix:
@@ -60,19 +63,19 @@ jobs:
         if: matrix.platform == 'mac'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run release
 
       - name: Build & Package (Windows)
         if: matrix.platform == 'win'
         env:
-          GH_TOKEN:             ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run release
 
       - name: Build & Package (Linux)
         if: matrix.platform == 'linux'
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run release
 
       - name: Upload artifacts
