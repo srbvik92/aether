@@ -20,68 +20,54 @@
     "test:watch": "vitest"
   },
   "build": {
-    "appId": "com.yourname.ai-code-app",
-    "productName": "AI Code App",
-    "copyright": "Copyright © 2025",
+    "appId": "com.srbvik92.aether",
+    "productName": "Aether",
+    "npmRebuild": false,
     "directories": {
-      "output": "dist-electron"
+      "buildResources": "build",
+      "output": "out"
     },
     "files": [
       "out/**/*",
+      "!**/.vscode/*",
+      "!src/*",
+      "!electron.vite.config.{js,ts,mjs,cjs}",
+      "!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md}",
+      "!{.env,.env.*,.npmrc,pnpm-lock.yaml}",
+      "!{tsconfig.json,tsconfig.*}",
       "!**/*.map",
       "!**/*.d.ts"
     ],
-    "afterSign": "scripts/notarize.cjs",
     "mac": {
-      "category": "public.app-category.developer-tools",
-      "icon": "resources/icon.icns",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "resources/entitlements.mac.plist",
-      "entitlementsInherit": "resources/entitlements.mac.plist",
       "target": [
-        { "target": "dmg",    "arch": ["x64", "arm64"] },
-        { "target": "zip",    "arch": ["x64", "arm64"] }
-      ]
-    },
-    "dmg": {
-      "contents": [
-        { "x": 410, "y": 150, "type": "link",  "path": "/Applications" },
-        { "x": 130, "y": 150, "type": "file" }
-      ]
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ],
+      "artifactName": "${name}-${version}-${arch}.${ext}"
     },
     "win": {
-      "icon": "resources/icon.ico",
-      "publisherName": "AI Code App",
+      "executableName": "aether",
       "verifyUpdateCodeSignature": false,
       "target": [
-        { "target": "nsis",  "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
-      ],
-      "certificateFile": "${env.WIN_CSC_LINK}",
-      "certificatePassword": "${env.WIN_CSC_KEY_PASSWORD}"
+        { "target": "nsis", "arch": ["x64"] }
+      ]
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "artifactName": "${name}-${version}-setup.${ext}",
+      "shortcutName": "${productName}",
+      "uninstallDisplayName": "${productName}",
+      "createDesktopShortcut": "always"
     },
     "linux": {
-      "icon": "resources/icons",
-      "category": "Development",
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb",      "arch": ["x64"] },
-        { "target": "rpm",      "arch": ["x64"] }
-      ]
+        { "target": "AppImage", "arch": ["x64"] }
+      ],
+      "artifactName": "${name}-${version}-${arch}.${ext}"
     },
     "publish": {
       "provider": "github",
-      "owner": "YOUR_GITHUB_USERNAME",
-      "repo": "YOUR_REPO_NAME",
-      "releaseType": "release"
+      "owner": "srbvik92",
+      "repo": "aether",
+      "private": true
     }
   },
   "dependencies": {
