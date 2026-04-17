@@ -59,12 +59,8 @@ jobs:
       - name: Build & Package (macOS)
         if: matrix.platform == 'mac'
         env:
-          APPLE_ID:           ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD:  ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID:      ${{ secrets.APPLE_TEAM_ID }}
-          CSC_LINK:           ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD:   ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          GH_TOKEN:           ${{ secrets.GH_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: npm run release
 
       - name: Build & Package (Windows)
