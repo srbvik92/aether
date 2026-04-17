@@ -1,0 +1,23 @@
+appId: com.yourname.ai-code-app
+productName: AI Code App
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.*}'
+  - '!{karma.conf.js,rollup.config.js,webpack.config.js}'
+win:
+  executableName: ai-code-app
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  artifactName: '${name}-${version}-setup.${ext}'
+  shortcutName: '${productName}'
+  uninstallDisplayName: '${productName}'
+  createDesktopShortcut: always

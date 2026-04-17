@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #666; }
+
+.light ::-webkit-scrollbar-thumb { background: #ccc; }
+.light ::-webkit-scrollbar-thumb:hover { background: #aaa; }
+
+/* ── Prose message styles ───────────────────────────────────────────────── */
+/* react-markdown renders its own elements; reset any global pre/code overrides
+   inside .prose-message so SyntaxHighlighter styles aren't clobbered          */
+.prose-message pre {
+  background: transparent !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+}
+.prose-message code {
+  background: transparent !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  font-size: inherit !important;
+  color: inherit !important;
+}
+
+/* ── Streaming cursor blink ─────────────────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+.streaming-cursor::after {
+  content: '▋';
+  @apply text-blue-500;
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* ── Select arrow colour fix in light mode ──────────────────────────────── */
+.light select option {
+  background: #ffffff;
+  color: #111827;
+}

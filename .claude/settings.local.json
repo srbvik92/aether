@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -E \"vitest|better-sqlite|^pg$|playwright\")",
+      "Bash(npm run:*)",
+      "Bash(grep -v \"//.*memory\")",
+      "Bash(grep -rn \"= memory\\\\b\\\\|,memory\\\\b\\\\|\\\\\\(memory\\\\b\\\\|{memory\\\\b\" D:/mywork/Projects/ChatUI/src/main/ --include=\"*.ts\")",
+      "Bash(node -e ':*)",
+      "Bash(grep -n '\\\\${')",
+      "Bash(npx vitest:*)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('optional:', Object.keys\\(p.optionalDependencies||{}\\).join\\(', '\\)\\)\")",
+      "Bash(node -e \"require\\('./out/main/index.js'\\)\")",
+      "Bash(npm list:*)",
+      "Bash(npx electron-vite:*)",
+      "Bash(node --check \"out/main/index.js\")",
+      "Bash(node --check \"out/preload/index.js\")",
+      "Bash(grep -n \"xenova\\\\|transformers\" src/main/*.ts out/main/index.js)",
+      "Bash(wmic process:*)",
+      "Bash(node --check D:/mywork/Projects/ChatUI/out/main/file-watcher-Cqu_0inH.js)",
+      "Bash(node --check D:/mywork/Projects/ChatUI/out/preload/index.js)",
+      "Bash(netstat -ano)",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
+      "WebFetch(domain:build.nvidia.com)",
+      "WebFetch(domain:docs.api.nvidia.com)"
+    ]
+  }
+}

@@ -1,0 +1,1709 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
+import {
+  AppSettings,
+  Provider,
+  CustomProviderConfig,
+  PROVIDER_MODELS,
+  PROVIDER_BASE_URLS,
+  VERTEX_LOCATIONS,
+  SemanticIndexInfo,
+  SemanticIndexStatusPayload
+} from '../../../shared/types'
+import { useSemanticIndex } from '../hooks/useSemanticIndex'
+import type { SemanticSearchResult } from '../../../shared/types'
+import { PROMPT_TEMPLATES, findMatchingTemplate } from '../utils/promptTemplates'
+import { validateSettings, ValidationResult, hasErrors } from '../utils/settingsValidator'
+
+interface Props {
+  settings: AppSettings
+  onSave: (settings: AppSettings) => void
+  onCancel: () => void
+}
+
+// ── Template dropdown (used inside Settings) ──────────────────────────────────
+function TemplateDropdown({
+  currentPrompt, onSelect
+}: { currentPrompt: string; onSelect: (prompt: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const ref             = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-700
+                   text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400
+                   hover:border-blue-300 dark:hover:border-blue-600 transition-colors bg-white dark:bg-gray-900"
+      >
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round"
+            d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" />
+        </svg>
+        Templates
+        <svg className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full mt-1 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl z-50 overflow-hidden">
+          <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-700">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+              Quick-start templates
+            </p>
+          </div>
+          <div className="max-h-80 overflow-y-auto">
+            {PROMPT_TEMPLATES.map(t => {
+              const active = t.prompt.trim() === currentPrompt.trim()
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => { onSelect(t.prompt); setOpen(false) }}
+                  className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
+                    active ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                  }`}
+                >
+                  <span className="text-lg leading-none mt-0.5">{t.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-medium ${active ? 'text-blue-600 dark:text-blue-400' : 'text-gray-800 dark:text-gray-200'}`}>
+                      {t.name}
+                      {active && <span className="ml-1.5 text-[10px] bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 rounded-full font-semibold">Active</span>}
+                    </p>
+                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{t.description}</p>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OllamaDetector({ onModelSelect }: { onModelSelect: (model: string) => void }) {
+  const [models,   setModels]   = useState<string[]>([])
+  const [loading,  setLoading]  = useState(false)
+  const [detected, setDetected] = useState(false)
+
+  const detect = async () => {
+    if (!window.api) return
+    setLoading(true)
+    const result = await window.api.listOllamaModels()
+    setLoading(false)
+    setDetected(true)
+    if (result.ok) setModels(result.models)
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={detect}
+          disabled={loading}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600 disabled:opacity-50 transition-colors"
+        >
+          {loading ? (
+            <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+            </svg>
+          ) : (
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          )}
+          {loading ? 'Detecting…' : 'Detect Ollama models'}
+        </button>
+        <span className="text-[10px] text-gray-400 dark:text-gray-600">Looks for Ollama at localhost:11434</span>
+      </div>
+      {detected && models.length === 0 && (
+        <p className="text-xs text-orange-500 dark:text-orange-400 mt-1.5">No Ollama models found. Is Ollama running?</p>
+      )}
+      {models.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {models.map(m => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => onModelSelect(m)}
+              className="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-[11px] text-gray-700 dark:text-gray-300 hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors font-mono"
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Custom Provider Manager ───────────────────────────────────────────────────
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+
+interface CustomProviderManagerProps {
+  providers:   CustomProviderConfig[]
+  activeId:    string | undefined
+  onProviders: (providers: CustomProviderConfig[]) => void
+  onSelect:    (p: CustomProviderConfig) => void
+  inputCls:    string
+  labelCls:    string
+  hintCls:     string
+}
+
+function CustomProviderManager({
+  providers, activeId, onProviders, onSelect, inputCls, labelCls, hintCls
+}: CustomProviderManagerProps) {
+  const emptyDraft = { id: '', name: '', baseUrl: '', apiKey: '', model: '' }
+  const [editing, setEditing] = useState<CustomProviderConfig | null>(null)
+  const [draft,   setDraft]   = useState(emptyDraft)
+
+  const openNew  = () => {
+    const newId = genId()
+    setEditing({ id: newId, name: '', baseUrl: '', apiKey: '', model: '' })
+    setDraft({ id: newId, name: '', baseUrl: '', apiKey: '', model: '' })
+  }
+  const openEdit = (p: CustomProviderConfig) => { setEditing(p); setDraft(p) }
+  const cancel   = () => { setEditing(null); setDraft(emptyDraft) }
+
+  const save = () => {
+    if (!draft.name.trim() || !draft.baseUrl.trim()) return
+    const entry: CustomProviderConfig = { ...draft, id: editing!.id }
+    const exists = providers.find(p => p.id === entry.id)
+    const updated = exists
+      ? providers.map(p => p.id === entry.id ? entry : p)
+      : [...providers, entry]
+    onProviders(updated)
+    cancel()
+  }
+
+  const remove = (id: string) => {
+    onProviders(providers.filter(p => p.id !== id))
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Saved providers list */}
+      {providers.length === 0 && !editing && (
+        <p className="text-xs text-gray-400 dark:text-gray-600 italic py-1">No custom providers saved yet.</p>
+      )}
+      {providers.map(p => (
+        <div
+          key={p.id}
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+            activeId === p.id
+              ? 'border-blue-400 dark:border-blue-600 bg-blue-50 dark:bg-blue-900/20'
+              : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-gray-300 dark:hover:border-gray-600'
+          }`}
+        >
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">{p.name}</p>
+            <p className="text-xs text-gray-400 dark:text-gray-600 truncate">{p.baseUrl} · {p.model || 'no default model'}</p>
+          </div>
+          <button
+            onClick={() => onSelect(p)}
+            className={`flex-shrink-0 text-xs px-2 py-1 rounded-md font-medium transition-colors ${
+              activeId === p.id
+                ? 'bg-blue-500 text-white'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-blue-100 dark:hover:bg-blue-900/30 hover:text-blue-600 dark:hover:text-blue-400'
+            }`}
+            title="Use this provider"
+          >
+            {activeId === p.id ? '✓ Active' : 'Use'}
+          </button>
+          <button
+            onClick={() => openEdit(p)}
+            className="flex-shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            title="Edit"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125" />
+            </svg>
+          </button>
+          <button
+            onClick={() => remove(p.id)}
+            className="flex-shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+            title="Delete"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      ))}
+
+      {/* Add/Edit form */}
+      {editing ? (
+        <div className="border border-blue-300 dark:border-blue-700 rounded-lg p-3 space-y-2.5 bg-blue-50/40 dark:bg-blue-900/10">
+          <p className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide">
+            {providers.find(p => p.id === editing.id) ? 'Edit provider' : 'New provider'}
+          </p>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Name <span className="text-red-400">*</span></label>
+            <input
+              type="text"
+              value={draft.name}
+              onChange={e => setDraft(f => ({ ...f, name: e.target.value }))}
+              placeholder="e.g. Ollama local, LM Studio, My Server"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Base URL <span className="text-red-400">*</span></label>
+            <input
+              type="text"
+              value={draft.baseUrl}
+              onChange={e => setDraft(f => ({ ...f, baseUrl: e.target.value }))}
+              placeholder="http://localhost:11434/v1"
+              className={inputCls}
+            />
+            <p className={hintCls}>Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1</p>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">API Key <span className="text-gray-400 font-normal">(leave blank for local)</span></label>
+            <input
+              type="password"
+              value={draft.apiKey}
+              onChange={e => setDraft(f => ({ ...f, apiKey: e.target.value }))}
+              placeholder="sk-... or leave blank"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Default Model</label>
+            <input
+              type="text"
+              value={draft.model}
+              onChange={e => setDraft(f => ({ ...f, model: e.target.value }))}
+              placeholder="e.g. llama3.2, mistral, phi3, qwen2.5-coder"
+              className={inputCls}
+            />
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={save}
+              disabled={!draft.name.trim() || !draft.baseUrl.trim()}
+              className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Save provider
+            </button>
+            <button
+              onClick={cancel}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={openNew}
+          className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-dashed border-gray-300 dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400 hover:border-blue-400 dark:hover:border-blue-600 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50/40 dark:hover:bg-blue-900/10 transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+          Add provider
+        </button>
+      )}
+    </div>
+  )
+}
+
+export default function Settings({ settings, onSave, onCancel }: Props) {
+  const [form, setForm] = useState<AppSettings>({ ...settings })
+  const originalSettings = useRef<AppSettings>({ ...settings })
+  const [hasChanges, setHasChanges] = useState(false)
+  const [importExportMsg, setImportExportMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [showKey, setShowKey] = useState(false)
+  const [showSA, setShowSA] = useState(false)
+  const [saFileName, setSaFileName] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null)
+  const [validationErrors, setValidationErrors] = useState<ValidationResult[]>([])
+
+  const handleSave = () => {
+    const results = validateSettings(form)
+    setValidationErrors(results)
+    if (hasErrors(results)) return  // Block save on errors
+    originalSettings.current = { ...form }
+    setHasChanges(false)
+    onSave(form)
+  }
+
+  const handleRevert = () => {
+    setForm({ ...originalSettings.current })
+    setHasChanges(false)
+    setValidationErrors([])
+  }
+
+  const handleExportSettings = async () => {
+    if (!window.api) return
+    const result = await window.api.exportSettings()
+    setImportExportMsg(result.ok
+      ? { ok: true, text: 'Settings exported successfully.' }
+      : { ok: false, text: result.error ?? 'Export failed.' }
+    )
+    setTimeout(() => setImportExportMsg(null), 3000)
+  }
+
+  const handleImportSettings = async () => {
+    if (!window.api) return
+    const result = await window.api.importSettings()
+    if (result.ok && result.settings) {
+      setForm(result.settings)
+      setImportExportMsg({ ok: true, text: 'Settings imported. Click Save to apply.' })
+      setTimeout(() => setImportExportMsg(null), 4000)
+    } else if (!result.ok && result.error) {
+      setImportExportMsg({ ok: false, text: result.error })
+      setTimeout(() => setImportExportMsg(null), 3000)
+    }
+  }
+
+  // ── Semantic index state ───────────────────────────────────────────────────
+  const [bm25Info, setBm25Info]           = useState<SemanticIndexInfo | null>(null)
+  const [bm25Status, setBm25Status]       = useState<SemanticIndexStatusPayload | null>(null)
+  const [bm25Building, setBm25Building]   = useState(false)
+  const [searchQuery, setSearchQuery]     = useState('')
+  const [searchResults, setSearchResults] = useState<SemanticSearchResult[]>([])
+  const [searching, setSearching]         = useState(false)
+
+  const { state: embedState, buildIndex: buildEmbedIndex, search: embedSearch } =
+    useSemanticIndex(form.workspacePath)
+
+  // Load BM25 index info when workspace changes
+  useEffect(() => {
+    if (!form.workspacePath || !window.api) return
+    window.api.getSemanticIndexInfo(form.workspacePath).then(setBm25Info).catch(() => {})
+    window.api.onSemanticIndexStatus(setBm25Status)
+    return () => window.api.removeSemanticListeners()
+  }, [form.workspacePath])
+
+  // Refresh info after build completes
+  useEffect(() => {
+    if (bm25Status?.phase === 'done' && form.workspacePath) {
+      setBm25Building(false)
+      window.api.getSemanticIndexInfo(form.workspacePath).then(setBm25Info).catch(() => {})
+    }
+    if (bm25Status?.phase === 'error') setBm25Building(false)
+  }, [bm25Status])
+
+  const handleBuildBm25 = useCallback(async () => {
+    if (!form.workspacePath) return
+    setBm25Building(true)
+    setBm25Status({ phase: 'scanning', done: 0, total: 0, message: 'Scanning files…' })
+    await window.api.buildSemanticIndex(form.workspacePath)
+  }, [form.workspacePath])
+
+  const handleSemanticSearch = useCallback(async () => {
+    if (!searchQuery.trim() || !form.workspacePath) return
+    setSearching(true)
+    try {
+      const results = await embedSearch(searchQuery, 5)
+      setSearchResults(results)
+    } catch {
+      setSearchResults([])
+    } finally {
+      setSearching(false)
+    }
+  }, [searchQuery, embedSearch, form.workspacePath])
+
+  const handleProviderChange = (provider: Provider) => {
+    const models = PROVIDER_MODELS[provider]
+    setForm((prev) => ({
+      ...prev,
+      provider,
+      baseUrl: PROVIDER_BASE_URLS[provider],
+      model: models.length > 0 ? models[0] : prev.model,
+      // Keep selectedCustomProviderId only when switching to 'custom'
+      selectedCustomProviderId: provider === 'custom' ? prev.selectedCustomProviderId : undefined
+    }))
+    setHasChanges(true)
+    setTestResult(null)
+  }
+
+  const handleSelectCustomProvider = (p: import('../../../shared/types').CustomProviderConfig) => {
+    setForm(prev => ({
+      ...prev,
+      provider: 'custom',
+      baseUrl:  p.baseUrl,
+      apiKey:   p.apiKey || prev.apiKey,
+      model:    p.model,
+      selectedCustomProviderId: p.id
+    }))
+    setHasChanges(true)
+  }
+
+  const handleCustomProvidersChange = (updated: import('../../../shared/types').CustomProviderConfig[]) => {
+    setForm(prev => ({ ...prev, customProviders: updated }))
+    setHasChanges(true)
+  }
+
+  // Track whether form has diverged from saved settings
+  useEffect(() => {
+    const changed = JSON.stringify(form) !== JSON.stringify(originalSettings.current)
+    setHasChanges(changed)
+  }, [form])
+
+  const isGemini  = form.provider === 'gemini'
+  const isCustom  = form.provider === 'custom'
+  const isNvidia  = form.provider === 'nvidia'
+  const needsApiKey = !isGemini
+
+  // Max output tokens per model (the slider ceiling)
+  const MAX_OUTPUT_TOKENS: Record<string, number> = {
+    // Anthropic — 32K output for claude-3.x+
+    'claude-opus-4-6':   32_768,
+    'claude-sonnet-4-6': 32_768,
+    'claude-haiku-4-5':  32_768,
+    // OpenAI
+    'gpt-4o':            16_384,
+    'gpt-4o-mini':       16_384,
+    'gpt-4-turbo':       16_384,
+    'gpt-3.5-turbo':      4_096,
+    // Gemini
+    'gemini-3.1-pro-preview':          65_536,
+    'gemini-2.5-pro-preview-05-06':   65_536,
+    'gemini-2.5-flash-preview-04-17': 65_536,
+    'gemini-2.0-flash-001':           8_192,
+    'gemini-2.0-flash-lite-001':      8_192,
+    'gemini-1.5-pro-002':             8_192,
+    'gemini-1.5-flash-002':           8_192,
+  }
+  const maxOutputCeiling = MAX_OUTPUT_TOKENS[form.model] ?? 32_768
+  const sliderStep = maxOutputCeiling > 32_768 ? 1024 : 256
+
+  const providerOptions: { value: Provider; label: string; badge: string }[] = [
+    { value: 'anthropic', label: 'Anthropic',       badge: 'Claude'        },
+    { value: 'openai',    label: 'OpenAI',           badge: 'GPT'           },
+    { value: 'gemini',    label: 'Google Gemini',    badge: 'Vertex AI'     },
+    { value: 'nvidia',    label: 'NVIDIA NIM',       badge: 'OpenAI-compat' },
+    { value: 'custom',    label: 'Custom / Local',   badge: 'OpenAI-compat' }
+  ]
+
+  // ── shared input / select className helpers ──────────────────────────────
+  const inputCls =
+    'w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-colors'
+
+  const selectCls =
+    'w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500 transition-colors'
+
+  const labelCls = 'block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5'
+  const hintCls  = 'text-xs text-gray-400 dark:text-gray-600 mt-1'
+
+  return (
+    <div className="flex flex-col h-full bg-gray-50 dark:bg-gray-950">
+      {/* Drag region + header */}
+      <div
+        className="h-9 border-b border-gray-200 dark:border-gray-800 flex-shrink-0 flex items-center px-3"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        <button
+          type="button"
+          onClick={onCancel}
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          title="Back to chat (Esc)"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-xl mx-auto px-6 py-8">
+          <h1 className="text-xl font-semibold mb-6 text-gray-900 dark:text-gray-100">Settings</h1>
+
+          {/* ── Provider dropdown ────────────────────────────────────── */}
+          <section className="mb-5">
+            <label className={labelCls}>Provider</label>
+            <select
+              value={form.provider}
+              onChange={(e) => handleProviderChange(e.target.value as Provider)}
+              className={selectCls}
+            >
+              {providerOptions.map(({ value, label, badge }) => (
+                <option key={value} value={value}>
+                  {label} — {badge}
+                </option>
+              ))}
+            </select>
+          </section>
+
+          {/* ── Vertex AI / Gemini fields ─────────────────────────── */}
+          {isGemini && (
+            <>
+              <section className="mb-4">
+                <label className={labelCls}>
+                  GCP Project ID
+                  <span className="text-gray-400 dark:text-gray-500 font-normal ml-2">— your Google Cloud project</span>
+                </label>
+                <input
+                  type="text"
+                  value={form.vertexProjectId}
+                  onChange={(e) => setForm({ ...form, vertexProjectId: e.target.value })}
+                  placeholder="my-gcp-project-id"
+                  className={inputCls}
+                />
+              </section>
+
+              <section className="mb-4">
+                <label className={labelCls}>Location</label>
+                <select
+                  value={form.vertexLocation}
+                  onChange={(e) => setForm({ ...form, vertexLocation: e.target.value })}
+                  className={selectCls}
+                >
+                  {VERTEX_LOCATIONS.map((loc) => (
+                    <option key={loc} value={loc}>
+                      {loc}{loc === 'global' ? '  (default)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </section>
+
+              {/* Service Account Key */}
+              <section className="mb-5">
+                <label className={labelCls}>
+                  Service Account Key (JSON)
+                  <span className="text-gray-400 dark:text-gray-500 font-normal ml-2">— stored encrypted</span>
+                </label>
+
+                {/* Upload row */}
+                <div className="flex items-center gap-2 mb-2">
+                  <label className="cursor-pointer flex items-center gap-2 px-3 py-1.5 rounded-lg
+                                    bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600
+                                    border border-gray-300 dark:border-gray-600
+                                    text-sm text-gray-700 dark:text-gray-200 transition-colors">
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                      <polyline points="17 8 12 3 7 8"/>
+                      <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    Upload .json file
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        if (!file) return
+                        setSaFileName(file.name)
+                        const reader = new FileReader()
+                        reader.onload = (ev) => {
+                          const content = ev.target?.result as string
+                          try {
+                            JSON.parse(content)
+                            setForm((prev) => ({ ...prev, vertexServiceAccountKey: content }))
+                          } catch {
+                            alert('Invalid JSON — please select a valid service account key file.')
+                            setSaFileName(null)
+                          }
+                        }
+                        reader.readAsText(file)
+                        e.target.value = ''
+                      }}
+                    />
+                  </label>
+
+                  {saFileName && (
+                    <span className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <polyline points="20 6 9 17 4 12"/>
+                      </svg>
+                      {saFileName}
+                    </span>
+                  )}
+                  {form.vertexServiceAccountKey && !saFileName && (
+                    <span className="text-xs text-green-600 dark:text-green-400">✓ Key loaded</span>
+                  )}
+                  {form.vertexServiceAccountKey && (
+                    <button
+                      onClick={() => { setForm((p) => ({ ...p, vertexServiceAccountKey: '' })); setSaFileName(null) }}
+                      className="ml-auto text-xs text-gray-400 hover:text-red-500 transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Paste fallback */}
+                <div className="relative">
+                  <textarea
+                    rows={showSA ? 8 : 2}
+                    value={form.vertexServiceAccountKey}
+                    onChange={(e) => { setForm({ ...form, vertexServiceAccountKey: e.target.value }); setSaFileName(null) }}
+                    placeholder={'Or paste JSON here…\n{ "type": "service_account", "project_id": "..." }'}
+                    className={`${inputCls} font-mono text-xs resize-none`}
+                  />
+                  <button
+                    onClick={() => setShowSA((s) => !s)}
+                    className="absolute right-2 top-2 text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 px-1"
+                  >
+                    {showSA ? 'Collapse' : 'Expand'}
+                  </button>
+                </div>
+                <p className={hintCls}>
+                  Leave blank to use Application Default Credentials (ADC).
+                  Create a key at{' '}
+                  <span className="text-blue-500">GCP Console → IAM → Service Accounts → Keys</span>
+                </p>
+              </section>
+            </>
+          )}
+
+          {/* ── API Key (non-Gemini) ──────────────────────────────────── */}
+          {needsApiKey && (
+            <section className="mb-5">
+              <label className={labelCls}>
+                API Key
+                <span className="text-gray-400 dark:text-gray-500 font-normal ml-2">— stored encrypted</span>
+              </label>
+              <div className="relative">
+                <input
+                  type={showKey ? 'text' : 'password'}
+                  value={form.apiKey}
+                  onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
+                  placeholder={
+                    form.provider === 'anthropic' ? 'sk-ant-…' :
+                    form.provider === 'openai'    ? 'sk-…' :
+                    'API key (or blank for local)'
+                  }
+                  className={`${inputCls} pr-16`}
+                />
+                <button
+                  onClick={() => setShowKey((s) => !s)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 px-1"
+                >
+                  {showKey ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              <p className={hintCls}>
+                {form.provider === 'anthropic' && <>Get your key at <span className="text-blue-500">console.anthropic.com</span></>}
+                {form.provider === 'openai'    && <>Get your key at <span className="text-blue-500">platform.openai.com/api-keys</span></>}
+                {form.provider === 'nvidia'    && <>Get your free API key at <span className="text-blue-500">build.nvidia.com</span> — 1000 free credits/month</>}
+              </p>
+            </section>
+          )}
+
+          {/* ── Custom providers manager ─────────────────────────── */}
+          {isCustom && (
+            <section className="mb-5">
+              <label className={labelCls}>
+                Saved Custom Providers
+                <span className="ml-1.5 text-gray-400 font-normal text-xs">— add any OpenAI-compatible endpoint</span>
+              </label>
+              <CustomProviderManager
+                providers={form.customProviders ?? []}
+                activeId={form.selectedCustomProviderId}
+                onProviders={handleCustomProvidersChange}
+                onSelect={handleSelectCustomProvider}
+                inputCls={inputCls}
+                labelCls={labelCls}
+                hintCls={hintCls}
+              />
+            </section>
+          )}
+
+          {/* ── Base URL (custom — shown when a provider is active or editing manually) */}
+          {isCustom && (
+            <section className="mb-5">
+              <label className={labelCls}>
+                Active Base URL
+                <span className="ml-1.5 text-gray-400 font-normal text-xs">— auto-filled when you click Use above</span>
+              </label>
+              <input
+                type="text"
+                value={form.baseUrl}
+                onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
+                placeholder="http://localhost:11434/v1"
+                className={inputCls}
+              />
+            </section>
+          )}
+
+          {/* ── Ollama model auto-detection ───────────────────────── */}
+          {isCustom && (
+            <section className="mb-5">
+              <OllamaDetector
+                onModelSelect={(model) => setForm(f => ({ ...f, model, baseUrl: 'http://localhost:11434/v1' }))}
+              />
+            </section>
+          )}
+
+          {/* ── Model ────────────────────────────────────────────────── */}
+          <section className="mb-5">
+            <label className={labelCls}>Model</label>
+            {isCustom ? (
+              <input
+                type="text"
+                value={form.model}
+                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                placeholder="e.g. llama3.2, mistral, phi3, qwen2.5-coder"
+                className={inputCls}
+              />
+            ) : isNvidia ? (
+              <>
+                <select
+                  value={PROVIDER_MODELS.nvidia.includes(form.model) ? form.model : '__custom__'}
+                  onChange={(e) => { if (e.target.value !== '__custom__') setForm({ ...form, model: e.target.value }) }}
+                  className={selectCls}
+                  size={1}
+                >
+                  {!PROVIDER_MODELS.nvidia.includes(form.model) && (
+                    <option value="__custom__">{form.model} (custom)</option>
+                  )}
+                  <optgroup label="── Meta / Llama ──────────────────">
+                    <option value="meta/llama-3.3-70b-instruct">meta/llama-3.3-70b-instruct</option>
+                    <option value="meta/llama-3.1-405b-instruct">meta/llama-3.1-405b-instruct</option>
+                    <option value="meta/llama-3.1-70b-instruct">meta/llama-3.1-70b-instruct</option>
+                    <option value="meta/llama-3.1-8b-instruct">meta/llama-3.1-8b-instruct</option>
+                    <option value="meta/llama-3.2-3b-instruct">meta/llama-3.2-3b-instruct</option>
+                    <option value="meta/llama-3.2-1b-instruct">meta/llama-3.2-1b-instruct</option>
+                    <option value="meta/llama-3.2-90b-vision-instruct">meta/llama-3.2-90b-vision-instruct</option>
+                    <option value="meta/llama-3.2-11b-vision-instruct">meta/llama-3.2-11b-vision-instruct</option>
+                    <option value="meta/codellama-70b">meta/codellama-70b</option>
+                  </optgroup>
+                  <optgroup label="── NVIDIA Nemotron ───────────────">
+                    <option value="nvidia/llama-3.1-nemotron-ultra-253b-v1">nvidia/llama-3.1-nemotron-ultra-253b-v1</option>
+                    <option value="nvidia/llama-3.3-nemotron-super-49b-v1">nvidia/llama-3.3-nemotron-super-49b-v1</option>
+                    <option value="nvidia/llama-3.3-nemotron-super-49b-v1.5">nvidia/llama-3.3-nemotron-super-49b-v1.5</option>
+                    <option value="nvidia/llama-3.1-nemotron-nano-8b-v1">nvidia/llama-3.1-nemotron-nano-8b-v1</option>
+                    <option value="nvidia/nemotron-mini-4b-instruct">nvidia/nemotron-mini-4b-instruct</option>
+                  </optgroup>
+                  <optgroup label="── Mistral ───────────────────────">
+                    <option value="mistralai/mistral-nemotron">mistralai/mistral-nemotron</option>
+                    <option value="mistralai/mistral-large">mistralai/mistral-large</option>
+                    <option value="mistralai/mistral-small-24b-instruct">mistralai/mistral-small-24b-instruct</option>
+                    <option value="mistralai/mixtral-8x22b-instruct">mistralai/mixtral-8x22b-instruct</option>
+                    <option value="mistralai/mixtral-8x7b-instruct">mistralai/mixtral-8x7b-instruct</option>
+                    <option value="mistralai/mistral-7b-instruct-v0.3">mistralai/mistral-7b-instruct-v0.3</option>
+                    <option value="mistralai/codestral-22b-instruct-v0.1">mistralai/codestral-22b-instruct-v0.1</option>
+                    <option value="mistralai/mathstral-7b-v01">mistralai/mathstral-7b-v01</option>
+                  </optgroup>
+                  <optgroup label="── DeepSeek ──────────────────────">
+                    <option value="deepseek-ai/deepseek-v3.1">deepseek-ai/deepseek-v3.1</option>
+                    <option value="deepseek-ai/deepseek-r1-distill-qwen-32b">deepseek-ai/deepseek-r1-distill-qwen-32b</option>
+                    <option value="deepseek-ai/deepseek-r1-distill-qwen-14b">deepseek-ai/deepseek-r1-distill-qwen-14b</option>
+                    <option value="deepseek-ai/deepseek-r1-distill-qwen-7b">deepseek-ai/deepseek-r1-distill-qwen-7b</option>
+                    <option value="deepseek-ai/deepseek-r1-distill-llama-8b">deepseek-ai/deepseek-r1-distill-llama-8b</option>
+                  </optgroup>
+                  <optgroup label="── Qwen ──────────────────────────">
+                    <option value="qwen/qwen3-coder-480b-a35b-instruct">qwen/qwen3-coder-480b-a35b-instruct</option>
+                    <option value="qwen/qwen3-5-122b-a10b">qwen/qwen3-5-122b-a10b</option>
+                    <option value="qwen/qwq-32b">qwen/qwq-32b</option>
+                    <option value="qwen/qwen2.5-coder-32b-instruct">qwen/qwen2.5-coder-32b-instruct</option>
+                    <option value="qwen/qwen2.5-coder-7b-instruct">qwen/qwen2.5-coder-7b-instruct</option>
+                    <option value="qwen/qwen2.5-7b-instruct">qwen/qwen2.5-7b-instruct</option>
+                  </optgroup>
+                  <optgroup label="── Google Gemma ──────────────────">
+                    <option value="google/gemma-2-27b-it">google/gemma-2-27b-it</option>
+                    <option value="google/gemma-2-9b-it">google/gemma-2-9b-it</option>
+                    <option value="google/gemma-3-1b-it">google/gemma-3-1b-it</option>
+                    <option value="google/codegemma-1.1-7b">google/codegemma-1.1-7b</option>
+                  </optgroup>
+                  <optgroup label="── Microsoft Phi ─────────────────">
+                    <option value="microsoft/phi-4-mini-instruct">microsoft/phi-4-mini-instruct</option>
+                    <option value="microsoft/phi-4-mini-flash-reasoning">microsoft/phi-4-mini-flash-reasoning</option>
+                    <option value="microsoft/phi-3.5-mini">microsoft/phi-3.5-mini</option>
+                    <option value="microsoft/phi-3-medium-128k-instruct">microsoft/phi-3-medium-128k-instruct</option>
+                    <option value="microsoft/phi-3-mini-128k-instruct">microsoft/phi-3-mini-128k-instruct</option>
+                  </optgroup>
+                  <optgroup label="── MiniMax ───────────────────────">
+                    <option value="minimaxai/minimax-m2.5">minimaxai/minimax-m2.5</option>
+                    <option value="minimaxai/minimax-m2.7">minimaxai/minimax-m2.7</option>
+                  </optgroup>
+                  <optgroup label="── Z-AI / GLM (Zhipu) ───────────">
+                    <option value="z-ai/glm4.7">z-ai/glm4.7</option>
+                    <option value="z-ai/glm5">z-ai/glm5</option>
+                  </optgroup>
+                  <optgroup label="── IBM Granite ───────────────────">
+                    <option value="ibm/granite-3_3-8b-instruct">ibm/granite-3_3-8b-instruct</option>
+                    <option value="ibm/granite-guardian-3.0-8b">ibm/granite-guardian-3.0-8b</option>
+                  </optgroup>
+                  <optgroup label="── Moonshot / Kimi ───────────────">
+                    <option value="moonshotai/kimi-k2-instruct">moonshotai/kimi-k2-instruct</option>
+                  </optgroup>
+                  <optgroup label="── TII Falcon ────────────────────">
+                    <option value="tiiuae/falcon3-7b-instruct">tiiuae/falcon3-7b-instruct</option>
+                  </optgroup>
+                  <optgroup label="── Other ─────────────────────────">
+                    <option value="openai/gpt-oss-120b">openai/gpt-oss-120b</option>
+                    <option value="openai/gpt-oss-20b">openai/gpt-oss-20b</option>
+                    <option value="bytedance/seed-oss-36b-instruct">bytedance/seed-oss-36b-instruct</option>
+                    <option value="ai21labs/jamba-1.5-mini-instruct">ai21labs/jamba-1.5-mini-instruct</option>
+                    <option value="bigcode/starcoder2-7b">bigcode/starcoder2-7b</option>
+                    <option value="upstage/solar-10.7b-instruct">upstage/solar-10.7b-instruct</option>
+                    <option value="abacusai/dracarys-llama-3.1-70b-instruct">abacusai/dracarys-llama-3.1-70b-instruct</option>
+                    <option value="sarvamai/sarvam-m">sarvamai/sarvam-m</option>
+                    <option value="marin/marin-8b-instruct">marin/marin-8b-instruct</option>
+                    <option value="igenius/colosseum_355b_instruct_16k">igenius/colosseum_355b_instruct_16k</option>
+                  </optgroup>
+                </select>
+                <input
+                  type="text"
+                  value={form.model}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                  placeholder="or type any model ID from build.nvidia.com"
+                  className={`${inputCls} mt-2 text-xs`}
+                />
+                <p className={hintCls}>Browse all models at <span className="text-blue-500">build.nvidia.com/explore</span></p>
+              </>
+            ) : (
+              <select
+                value={form.model}
+                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                className={selectCls}
+              >
+                {PROVIDER_MODELS[form.provider].map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            )}
+            {isGemini && (
+              <p className={hintCls}>Ensure the model is enabled in your GCP project's Vertex AI Model Garden.</p>
+            )}
+          </section>
+
+          {/* ── Max Tokens ───────────────────────────────────────────── */}
+          <section className="mb-5">
+            <label className={labelCls}>
+              Max Tokens
+              <span className="text-gray-400 dark:text-gray-500 font-normal ml-2">({form.maxTokens.toLocaleString()})</span>
+            </label>
+            <input
+              type="range" min={256} max={maxOutputCeiling} step={sliderStep}
+              value={Math.min(form.maxTokens, maxOutputCeiling)}
+              onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) })}
+              className="w-full accent-blue-500"
+            />
+            <div className="flex justify-between text-xs text-gray-400 dark:text-gray-600 mt-1">
+              <span>256</span><span>{maxOutputCeiling.toLocaleString()}</span>
+            </div>
+          </section>
+
+          {/* ── Max Iterations ───────────────────────────────────────── */}
+          <section className="mb-5">
+            <label className={labelCls}>
+              Max Tool-Call Iterations
+              <span className="text-gray-400 dark:text-gray-500 font-normal ml-2">({form.maxIterations})</span>
+            </label>
+            <p className={`${hintCls} mb-2`}>
+              How many rounds of tool calls the AI can make in a single turn.
+              Higher values let it do deep research and multi-step coding tasks.
+              Lower values cap cost and runtime.
+            </p>
+            <input
+              type="range" min={1} max={200} step={1}
+              value={form.maxIterations}
+              onChange={(e) => setForm({ ...form, maxIterations: Number(e.target.value) })}
+              className="w-full accent-blue-500"
+            />
+            <div className="flex justify-between text-xs text-gray-400 dark:text-gray-600 mt-1">
+              <span>1 (single reply)</span>
+              <span className="text-center">100 (default)</span>
+              <span>200 (deep research)</span>
+            </div>
+          </section>
+
+          {/* ── System Prompt ─────────────────────────────────────────── */}
+          <section className="mb-6">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className={`${labelCls} mb-0`}>System Prompt</label>
+              <TemplateDropdown
+                currentPrompt={form.systemPrompt}
+                onSelect={(prompt) => setForm({ ...form, systemPrompt: prompt })}
+              />
+            </div>
+            <textarea
+              rows={4}
+              value={form.systemPrompt}
+              onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
+              className={`${inputCls} resize-none`}
+            />
+            {(() => {
+              const match = findMatchingTemplate(form.systemPrompt)
+              return match ? (
+                <p className="text-[11px] text-blue-500 dark:text-blue-400 mt-1">
+                  {match.icon} Using template: <span className="font-medium">{match.name}</span>
+                </p>
+              ) : null
+            })()}
+          </section>
+
+          {/* ── Appearance ───────────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>Theme</label>
+            <div className="flex gap-2 mt-1">
+              {(['dark', 'light', 'system'] as const).map(t => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, theme: t }))}
+                  className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
+                    form.theme === t
+                      ? 'bg-blue-600 border-blue-600 text-white'
+                      : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
+                  }`}
+                >
+                  {t === 'dark' ? '🌙 Dark' : t === 'light' ? '☀️ Light' : '💻 System'}
+                </button>
+              ))}
+            </div>
+            <p className={`${hintCls} mt-1.5`}>System follows your OS dark/light preference automatically.</p>
+          </section>
+
+          {/* ── Workspace Folder ──────────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>
+              Workspace Folder
+              <span className="ml-2 font-normal text-blue-500 dark:text-blue-400 text-xs">Agent tool use</span>
+            </label>
+            <p className={`${hintCls} mb-2`}>
+              The folder the AI agent can read, write, and run commands in.
+              Required for tool use (Anthropic provider only).
+            </p>
+            <div className="flex items-center gap-2">
+              <div className={`${inputCls} flex-1 font-mono text-xs truncate ${!form.workspacePath ? 'text-gray-400 dark:text-gray-600 italic' : ''}`}>
+                {form.workspacePath || 'No folder selected'}
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const result = await window.api.pickFolder()
+                  if (result.path) setForm(prev => ({ ...prev, workspacePath: result.path! }))
+                }}
+                className="flex-shrink-0 px-3 py-2 rounded-lg text-sm font-medium transition-colors
+                           bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600
+                           text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600"
+              >
+                Browse…
+              </button>
+              {form.workspacePath && (
+                <button
+                  type="button"
+                  onClick={() => setForm(prev => ({ ...prev, workspacePath: '' }))}
+                  className="flex-shrink-0 text-xs text-gray-400 hover:text-red-500 transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {form.workspacePath && (
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                Agent tools enabled — AI can read/write files and run commands in this folder
+              </div>
+            )}
+          </section>
+
+          {/* ── Codebase Index ────────────────────────────────────────── */}
+          {form.workspacePath && (
+            <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+              <label className={labelCls}>
+                Codebase Index
+                <span className="ml-2 font-normal text-purple-500 dark:text-purple-400 text-xs">Semantic search</span>
+              </label>
+              <p className={`${hintCls} mb-3`}>
+                Indexes your workspace so the AI can use <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">semantic_search</code> to
+                find relevant files by concept. Also enables the search panel below.
+              </p>
+
+              {/* ── BM25 index (agent tool) ── */}
+              <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden mb-3">
+                <div className="px-3 py-2.5 bg-gray-50 dark:bg-gray-800/60 flex items-center gap-3">
+                  <span className="text-lg">🔍</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                      Keyword Index <span className="font-normal text-gray-400">(BM25 — agent tool)</span>
+                    </p>
+                    {bm25Info?.exists ? (
+                      <p className="text-xs text-green-600 dark:text-green-400 mt-0.5">
+                        ✓ {bm25Info.chunkCount.toLocaleString()} chunks · {bm25Info.fileCount} files
+                        {bm25Info.createdAt > 0 && (
+                          <span className="text-gray-400"> · {new Date(bm25Info.createdAt).toLocaleDateString()}</span>
+                        )}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-400 mt-0.5">Not indexed yet</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleBuildBm25}
+                    disabled={bm25Building}
+                    className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors
+                               bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600
+                               text-gray-700 dark:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {bm25Building ? 'Building…' : bm25Info?.exists ? 'Re-index' : 'Build Index'}
+                  </button>
+                </div>
+
+                {/* BM25 progress */}
+                {bm25Building && bm25Status && (
+                  <div className="px-3 py-2 bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-800">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <svg className="w-3 h-3 animate-spin text-blue-500 flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                      </svg>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">{bm25Status.message}</span>
+                    </div>
+                    {bm25Status.total > 0 && (
+                      <div className="h-1 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.round((bm25Status.done / bm25Status.total) * 100)}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+                {bm25Status?.phase === 'done' && !bm25Building && (
+                  <div className="px-3 py-2 bg-green-50 dark:bg-green-900/20 border-t border-green-100 dark:border-green-900">
+                    <span className="text-xs text-green-600 dark:text-green-400">✓ {bm25Status.message}</span>
+                  </div>
+                )}
+                {bm25Status?.phase === 'error' && (
+                  <div className="px-3 py-2 bg-red-50 dark:bg-red-900/20 border-t border-red-100 dark:border-red-900">
+                    <span className="text-xs text-red-500 dark:text-red-400">✕ {bm25Status.message}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Dense embedding index (WASM, optional) ── */}
+              <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
+                <div className="px-3 py-2.5 bg-gray-50 dark:bg-gray-800/60 flex items-center gap-3">
+                  <span className="text-lg">🧠</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                      Embedding Index <span className="font-normal text-gray-400">(MiniLM-L6 · WASM · local)</span>
+                    </p>
+                    {embedState.phase === 'done' ? (
+                      <p className="text-xs text-green-600 dark:text-green-400 mt-0.5">
+                        ✓ {embedState.detail}
+                      </p>
+                    ) : embedState.phase === 'error' ? (
+                      <p className="text-xs text-red-500 mt-0.5">{embedState.detail}</p>
+                    ) : embedState.phase !== 'idle' ? (
+                      <p className="text-xs text-blue-500 mt-0.5">{embedState.detail}</p>
+                    ) : (
+                      <p className="text-xs text-gray-400 mt-0.5">Not indexed — first run downloads ~23 MB model</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={buildEmbedIndex}
+                    disabled={['model-loading','fetching-files','embedding','saving'].includes(embedState.phase)}
+                    className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors
+                               bg-purple-100 dark:bg-purple-900/40 hover:bg-purple-200 dark:hover:bg-purple-900/60
+                               text-purple-700 dark:text-purple-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {embedState.phase === 'idle' || embedState.phase === 'done' || embedState.phase === 'error'
+                      ? (embedState.phase === 'done' ? 'Re-index' : 'Build')
+                      : 'Building…'}
+                  </button>
+                </div>
+
+                {/* Embedding progress */}
+                {(['model-loading','fetching-files','embedding','saving'] as const).includes(embedState.phase as never) && (
+                  <div className="px-3 py-2 bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-800">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <svg className="w-3 h-3 animate-spin text-purple-500 flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                      </svg>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">{embedState.detail}</span>
+                      {embedState.chunksTotal > 0 && (
+                        <span className="ml-auto text-xs text-gray-400">
+                          {embedState.chunksDone} / {embedState.chunksTotal}
+                        </span>
+                      )}
+                    </div>
+                    {embedState.progress > 0 && (
+                      <div className="h-1 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-purple-500 rounded-full transition-all duration-300"
+                          style={{ width: `${embedState.progress}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* ── Test search ── */}
+              {embedState.phase === 'done' && (
+                <div>
+                  <p className="text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">Test semantic search</p>
+                  <div className="flex gap-2">
+                    <input
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleSemanticSearch()}
+                      placeholder='e.g. "authentication middleware"'
+                      className={`${inputCls} flex-1 text-xs`}
+                    />
+                    <button
+                      onClick={handleSemanticSearch}
+                      disabled={searching || !searchQuery.trim()}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-50 transition-colors"
+                    >
+                      {searching ? '…' : 'Search'}
+                    </button>
+                  </div>
+
+                  {searchResults.length > 0 && (
+                    <div className="mt-2 space-y-1.5 max-h-64 overflow-y-auto">
+                      {searchResults.map((r, i) => (
+                        <div key={i} className="rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2 bg-white dark:bg-gray-900">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs font-mono text-blue-600 dark:text-blue-400 truncate flex-1">{r.path}</span>
+                            <span className="text-xs text-gray-400 flex-shrink-0">L{r.startLine}–{r.endLine}</span>
+                            <span className="text-xs text-purple-500 flex-shrink-0">↑{r.score.toFixed(2)}</span>
+                          </div>
+                          <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap line-clamp-3 font-mono">{r.excerpt}</pre>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ── Web Search (Brave API Key) ────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>
+              Brave Search API Key
+              <span className="ml-2 font-normal text-orange-500 dark:text-orange-400 text-xs">Web search tool</span>
+            </label>
+            <p className={`${hintCls} mb-2`}>
+              Enables the AI to search the web and fetch URLs. Get a free key at{' '}
+              <a
+                href="https://brave.com/search/api/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-500 hover:underline"
+              >
+                brave.com/search/api
+              </a>
+              {' '}(free tier: 2 000 queries/month).
+            </p>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={form.braveApiKey}
+                onChange={(e) => setForm({ ...form, braveApiKey: e.target.value })}
+                placeholder="BSA…"
+                className={`${inputCls} w-full pr-10 font-mono text-sm`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(v => !v)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xs"
+              >
+                {showKey ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {form.braveApiKey ? (
+              <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+                ✓ Web search enabled — AI can search the web and fetch any URL
+              </p>
+            ) : (
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                Without a key the AI can still fetch URLs you paste directly in chat, but cannot search
+              </p>
+            )}
+          </section>
+
+          {/* ── Generation Parameters ─────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>Generation Parameters</label>
+            <p className={`${hintCls} mb-4`}>
+              Control randomness and output diversity. Leave at default for most tasks.
+            </p>
+
+            {/* Temperature */}
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Temperature</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono text-blue-600 dark:text-blue-400 w-16 text-right">
+                    {form.temperature !== undefined ? form.temperature.toFixed(2) : 'default'}
+                  </span>
+                  {form.temperature !== undefined && (
+                    <button type="button" onClick={() => setForm(f => ({ ...f, temperature: undefined }))}
+                            className="text-[10px] text-gray-400 hover:text-red-500 transition-colors" title="Reset">✕</button>
+                  )}
+                </div>
+              </div>
+              <input type="range" min={0} max={1} step={0.01}
+                     value={form.temperature ?? 0.7}
+                     onMouseDown={() => { if (form.temperature === undefined) setForm(f => ({ ...f, temperature: 0.7 })) }}
+                     onChange={e => setForm(f => ({ ...f, temperature: parseFloat(e.target.value) }))}
+                     className="w-full accent-blue-500 cursor-pointer" />
+              <div className="flex justify-between text-[10px] text-gray-400 dark:text-gray-600 mt-0.5">
+                <span>0 — deterministic</span>
+                <span>1 — creative</span>
+              </div>
+            </div>
+
+            {/* Top P */}
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Top P (nucleus sampling)</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono text-blue-600 dark:text-blue-400 w-16 text-right">
+                    {form.topP !== undefined ? form.topP.toFixed(2) : 'default'}
+                  </span>
+                  {form.topP !== undefined && (
+                    <button type="button" onClick={() => setForm(f => ({ ...f, topP: undefined }))}
+                            className="text-[10px] text-gray-400 hover:text-red-500 transition-colors" title="Reset">✕</button>
+                  )}
+                </div>
+              </div>
+              <input type="range" min={0} max={1} step={0.01}
+                     value={form.topP ?? 1.0}
+                     onMouseDown={() => { if (form.topP === undefined) setForm(f => ({ ...f, topP: 1.0 })) }}
+                     onChange={e => setForm(f => ({ ...f, topP: parseFloat(e.target.value) }))}
+                     className="w-full accent-blue-500 cursor-pointer" />
+              <div className="flex justify-between text-[10px] text-gray-400 dark:text-gray-600 mt-0.5">
+                <span>0 — narrow</span>
+                <span>1 — full vocabulary</span>
+              </div>
+            </div>
+
+            {/* Reasoning Depth */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Reasoning Depth</span>
+                <span className="text-[10px] text-gray-400 dark:text-gray-500 italic">
+                  {form.provider === 'anthropic' && 'Extended thinking — claude-opus-4 / sonnet-4 / 3-7'}
+                  {form.provider === 'openai'    && 'Reasoning effort — o1, o3, o4-mini series'}
+                  {form.provider === 'gemini'    && 'Thinking budget — gemini-2.5 / 3.1'}
+                  {(form.provider === 'nvidia' || form.provider === 'custom') && 'Not supported by this provider'}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-1.5">
+                {(['off', 'low', 'medium', 'high'] as const).map(d => {
+                  const active = (form.reasoningDepth ?? 'off') === d
+                  const unsupported = form.provider === 'nvidia' || form.provider === 'custom'
+                  const icons   = { off: '◌', low: '○', medium: '◎', high: '●' }
+                  const budgets: Record<string, Record<string, string>> = {
+                    anthropic: { off: '—',    low: '1k t',  medium: '8k t',  high: '16k t'  },
+                    openai:    { off: '—',    low: 'low',   medium: 'med',   high: 'high'   },
+                    gemini:    { off: '0 t',  low: '512 t', medium: '4k t',  high: '16k t'  },
+                  }
+                  const budget = budgets[form.provider]?.[d] ?? (d === 'off' ? '—' : d)
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      disabled={unsupported && d !== 'off'}
+                      onClick={() => setForm(f => ({ ...f, reasoningDepth: d }))}
+                      className={`flex flex-col items-center gap-0.5 py-2 px-1 rounded-lg border text-xs font-medium transition-all
+                        ${active
+                          ? 'border-blue-400 dark:border-blue-600 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
+                          : 'border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600'
+                        }
+                        ${unsupported && d !== 'off' ? 'opacity-30 cursor-not-allowed' : ''}`}
+                    >
+                      <span className={`text-base leading-none ${
+                        d === 'high'   ? 'text-violet-500' :
+                        d === 'medium' ? 'text-blue-500'   :
+                        d === 'low'    ? 'text-blue-400'   : 'text-gray-300 dark:text-gray-600'
+                      }`}>{icons[d]}</span>
+                      <span className="capitalize">{d}</span>
+                      <span className="text-[9px] text-gray-400 dark:text-gray-600 font-mono">{budget}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <p className={`${hintCls} mt-1.5`}>
+                Default for new conversations. Can be changed per-conversation in the chat input bar.
+                {form.reasoningDepth && form.reasoningDepth !== 'off' && form.provider === 'anthropic' && (
+                  <span className="block mt-0.5 text-yellow-600 dark:text-yellow-500">
+                    ⚠ Extended thinking forces temperature = 1 and disables top_p.
+                  </span>
+                )}
+              </p>
+            </div>
+          </section>
+
+          {/* ── Edit Approval ────────────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>File Edit Approval</label>
+            <p className={`${hintCls} mb-3`}>
+              When enabled, the AI pauses before writing or editing any file and shows you a diff to review — just like Claude Code's edit flow.
+              Disable to let the AI write files autonomously.
+            </p>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setForm(prev => ({ ...prev, requireEditApproval: !(prev.requireEditApproval !== false) }))}
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 cursor-pointer focus:outline-none
+                  ${form.requireEditApproval !== false ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}`}
+                role="switch"
+                aria-checked={form.requireEditApproval !== false}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200
+                    ${form.requireEditApproval !== false ? 'translate-x-5' : 'translate-x-0'}`}
+                />
+              </button>
+              <span className={`text-sm font-medium ${form.requireEditApproval !== false ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                {form.requireEditApproval !== false
+                  ? 'On — review every file write before it happens'
+                  : 'Off — AI writes files without prompting'}
+              </span>
+            </div>
+          </section>
+
+          {/* ── Trusted Commands ─────────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>
+              Trusted Commands
+              <span className="ml-2 font-normal text-green-600 dark:text-green-400 text-xs">Auto-approved</span>
+            </label>
+            <p className={`${hintCls} mb-2`}>
+              Command prefixes that run without approval prompts. One per line.
+              Dangerous commands (<code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">rm -rf</code>,{' '}
+              <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">git reset --hard</code>, etc.)
+              always require approval regardless of this list.
+            </p>
+            <textarea
+              rows={6}
+              value={(form.trustedCommands ?? []).join('\n')}
+              onChange={(e) => {
+                const commands = e.target.value
+                  .split('\n')
+                  .map(l => l.trim())
+                  .filter(l => l.length > 0)
+                setForm(prev => ({ ...prev, trustedCommands: commands }))
+              }}
+              placeholder={'npm\nyarn\npnpm\ncargo\ngo\npython\ngit status\ngit log\ngit diff'}
+              className={`${inputCls} font-mono text-xs resize-y`}
+              spellCheck={false}
+            />
+            <p className={hintCls}>
+              {(form.trustedCommands ?? []).length} trusted prefix{(form.trustedCommands ?? []).length !== 1 ? 'es' : ''} ·
+              Commands are matched by prefix (e.g. <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">npm</code> trusts any <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">npm …</code> command)
+            </p>
+          </section>
+
+          {/* ── RAG & API Server ─────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>Agent Features</label>
+
+            {/* RAG toggle */}
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Auto-RAG</p>
+                <p className={hintCls}>Automatically inject semantically relevant workspace chunks into context before each message. Requires BM25 index to be built.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, ragEnabled: !f.ragEnabled }))}
+                className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative mt-0.5 ${form.ragEnabled ? 'bg-teal-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${form.ragEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+
+            {/* HTTP API server */}
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex-1">
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Local HTTP API</p>
+                <p className={hintCls}>Expose a REST endpoint at <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">http://127.0.0.1:{form.apiServerPort ?? 39400}/api/chat</code> so scripts and CI can send messages.</p>
+                {form.apiServerEnabled && (
+                  <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+                    ✓ API server enabled — <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">POST /api/chat {"{ prompt: string }"}</code>
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, apiServerEnabled: !f.apiServerEnabled }))}
+                className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative mt-0.5 ${form.apiServerEnabled ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${form.apiServerEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            {form.apiServerEnabled && (
+              <div className="mt-2 flex items-center gap-2">
+                <label className="text-xs text-gray-500 dark:text-gray-400">Port</label>
+                <input
+                  type="number"
+                  min={1024} max={65535}
+                  value={form.apiServerPort ?? 39400}
+                  onChange={e => setForm(f => ({ ...f, apiServerPort: parseInt(e.target.value) || 39400 }))}
+                  className="w-24 bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded px-2 py-1 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
+                />
+              </div>
+            )}
+          </section>
+
+          {/* ── GitHub Personal Access Token ─────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>
+              GitHub Personal Access Token
+              <span className="ml-2 font-normal text-gray-500 dark:text-gray-400 text-xs">Optional</span>
+            </label>
+            <p className={`${hintCls} mb-2`}>
+              Used by the GitHub panel to list and create PRs &amp; issues.
+              Create a token at{' '}
+              <a
+                href="https://github.com/settings/tokens"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-500 hover:underline"
+              >
+                github.com/settings/tokens
+              </a>{' '}
+              with <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">repo</code> scope.
+            </p>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={form.githubToken ?? ''}
+                onChange={(e) => setForm({ ...form, githubToken: e.target.value })}
+                placeholder="ghp_…"
+                className={`${inputCls} w-full pr-10 font-mono text-sm`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(k => !k)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xs"
+              >
+                {showKey ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {form.githubToken ? (
+              <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+                ✓ GitHub token set — use the GitHub panel to manage PRs &amp; issues
+              </p>
+            ) : (
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                Without a token, the GitHub panel will use the token you enter there directly
+              </p>
+            )}
+          </section>
+
+          {/* ── Integrations ───────────────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-3">Integrations</p>
+
+            {/* Jira */}
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Jira</p>
+            <div className="flex flex-col gap-2 mb-4">
+              <input
+                type="text"
+                placeholder="Jira URL (e.g. https://yourorg.atlassian.net)"
+                value={form.jiraUrl ?? ''}
+                onChange={e => setForm(f => ({ ...f, jiraUrl: e.target.value }))}
+                className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <input
+                type="email"
+                placeholder="Jira email"
+                value={form.jiraEmail ?? ''}
+                onChange={e => setForm(f => ({ ...f, jiraEmail: e.target.value }))}
+                className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <input
+                type="password"
+                placeholder="Jira API token"
+                value={form.jiraToken ?? ''}
+                onChange={e => setForm(f => ({ ...f, jiraToken: e.target.value }))}
+                className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            {/* Linear */}
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Linear</p>
+            <div className="mb-4">
+              <input
+                type="password"
+                placeholder="Linear API token (lin_api_…)"
+                value={form.linearToken ?? ''}
+                onChange={e => setForm(f => ({ ...f, linearToken: e.target.value }))}
+                className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            {/* Webhooks */}
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Webhooks</p>
+            <div className="flex flex-col gap-2 mb-4">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, webhookEnabled: !f.webhookEnabled }))}
+                  className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative ${form.webhookEnabled ? 'bg-orange-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                >
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${form.webhookEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </button>
+                <div>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">Fire webhook on completion</p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500">POST to your URL when the AI finishes a response</p>
+                </div>
+              </div>
+              {form.webhookEnabled && (
+                <input
+                  type="url"
+                  placeholder="Webhook URL (https://…)"
+                  value={form.webhookUrl ?? ''}
+                  onChange={e => setForm(f => ({ ...f, webhookUrl: e.target.value }))}
+                  className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                />
+              )}
+            </div>
+
+            {/* Docker */}
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Docker Sandbox</p>
+            <div className="flex flex-col gap-2 mb-4">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, dockerEnabled: !f.dockerEnabled }))}
+                  className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative ${form.dockerEnabled ? 'bg-sky-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                >
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${form.dockerEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </button>
+                <div>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">Use Docker sandbox</p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500">Run code in isolated containers via run_docker tool</p>
+                </div>
+              </div>
+              {form.dockerEnabled && (
+                <input
+                  type="text"
+                  placeholder="Default image (e.g. node:20-alpine)"
+                  value={form.dockerImage ?? ''}
+                  onChange={e => setForm(f => ({ ...f, dockerImage: e.target.value }))}
+                  className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+              )}
+            </div>
+
+            {/* Database */}
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Database</p>
+            <div className="mb-2">
+              <input
+                type="text"
+                placeholder="Default connection string (sqlite path or postgres://…)"
+                value={form.dbConnectionString ?? ''}
+                onChange={e => setForm(f => ({ ...f, dbConnectionString: e.target.value }))}
+                className="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-gray-400 dark:text-gray-500 mt-1">
+                Used as the default for the query_database tool when no connection is specified
+              </p>
+            </div>
+          </section>
+
+          {/* ── Test result ───────────────────────────────────────────── */}
+          {testResult && (
+            <div className={`mb-4 p-3 rounded-lg text-sm ${
+              testResult.ok
+                ? 'bg-green-50 dark:bg-green-500/10 border border-green-400 dark:border-green-500 text-green-700 dark:text-green-300'
+                : 'bg-red-50 dark:bg-red-500/10 border border-red-400 dark:border-red-500 text-red-700 dark:text-red-300'
+            }`}>
+              {testResult.ok ? '✓ Connection successful!' : `✕ ${testResult.error}`}
+            </div>
+          )}
+
+          {/* ── Validation errors ────────────────────────────────────── */}
+              {validationErrors.length > 0 && (
+                <div className="flex flex-col gap-1.5 mb-4">
+                  {validationErrors.map((v, i) => (
+                    <div key={i} className={`flex items-start gap-2 text-xs px-3 py-2 rounded-xl ${
+                      v.level === 'error'
+                        ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                        : 'bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300'
+                    }`}>
+                      <span className="flex-shrink-0 mt-0.5">{v.level === 'error' ? '✗' : '⚠'}</span>
+                      <span>{v.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+          {/* ── Actions ───────────────────────────────────────────────── */}
+          <div className="flex flex-col gap-2">
+              {/* Import/Export row */}
+              <div className="flex items-center gap-2 flex-1">
+                <button
+                  type="button"
+                  onClick={handleExportSettings}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors bg-white dark:bg-gray-900"
+                  title="Export settings to JSON file"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                  Export
+                </button>
+                <button
+                  type="button"
+                  onClick={handleImportSettings}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors bg-white dark:bg-gray-900"
+                  title="Import settings from JSON file"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                  Import
+                </button>
+                {importExportMsg && (
+                  <span className={`text-xs ${importExportMsg.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'}`}>
+                    {importExportMsg.text}
+                  </span>
+                )}
+              </div>
+            <div className="flex gap-3">
+              {hasChanges && (
+                <button
+                  type="button"
+                  onClick={handleRevert}
+                  className="px-4 py-2 rounded-xl text-xs font-medium border border-orange-200 dark:border-orange-800 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-colors"
+                  title="Revert all unsaved changes"
+                >
+                  Revert
+                </button>
+              )}
+            <button
+              onClick={handleSave}
+              className="flex-1 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors text-sm font-medium"
+            >
+              Save Settings
+            </button>
+            <button
+              onClick={onCancel}
+              className="px-4 py-2 rounded-lg bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 transition-colors text-sm"
+            >
+              Cancel
+            </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
