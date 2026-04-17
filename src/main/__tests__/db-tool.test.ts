@@ -8,7 +8,12 @@ const tmpDir = join(os.tmpdir(), `chatui-db-test-${Date.now()}`)
 beforeAll(() => mkdirSync(tmpDir, { recursive: true }))
 afterAll(() => { try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* ignore */ } })
 
-describe('queryDatabase — SQLite', () => {
+// better-sqlite3 is compiled for Electron (native C++ addon).
+// In CI the test runner is plain Node.js — a different ABI — so the binary
+// cannot load. Skip the native tests there; run them locally where Electron is.
+const isCI = !!process.env.CI
+
+describe.skipIf(isCI)('queryDatabase — SQLite', () => {
   it('creates and queries an SQLite database', async () => {
     // Dynamically import to skip if better-sqlite3 not installed
     let Database: unknown

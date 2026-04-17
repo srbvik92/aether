@@ -26,7 +26,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run unit tests
-        run: npx vitest run --exclude "src/main/__tests__/db-tool.test.ts"
+        run: npm test
 
       - name: Lint
         run: npm run lint
