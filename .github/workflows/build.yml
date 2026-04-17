@@ -37,12 +37,33 @@ jobs:
           node-version: 20
           cache: npm
 
+      # Python is required by node-gyp to compile native modules from source
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Windows: make sure MSVC build tools are on PATH for node-gyp
+      - name: Setup MSVC (Windows)
+        if: matrix.platform == 'win'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install dependencies
         run: npm ci
+        env:
+          # Prevent postinstall electron-rebuild from running during npm ci
+          # We'll rebuild explicitly in the next step with the right config
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
 
-      - name: Rebuild native modules (Windows)
-        if: matrix.platform == 'win'
+      - name: Download Electron binary
+        run: npx electron --version
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 0
+
+      - name: Rebuild native modules
         run: npm run rebuild-native
+        env:
+          npm_config_msvs_version: '2022'
 
       - name: Build & Package (macOS)
         if: matrix.platform == 'mac'
@@ -52,21 +73,19 @@ jobs:
           APPLE_TEAM_ID:      ${{ secrets.APPLE_TEAM_ID }}
           CSC_LINK:           ${{ secrets.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD:   ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          GH_TOKEN:           ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN:           ${{ secrets.GH_TOKEN }}
         run: npm run release
 
       - name: Build & Package (Windows)
         if: matrix.platform == 'win'
         env:
-          WIN_CSC_LINK:         ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-          GH_TOKEN:             ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN:             ${{ secrets.GH_TOKEN }}
         run: npm run release
 
       - name: Build & Package (Linux)
         if: matrix.platform == 'linux'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: npm run release
 
       - name: Upload artifacts
@@ -74,12 +93,11 @@ jobs:
         with:
           name: release-${{ matrix.platform }}
           path: |
-            dist-electron/*.dmg
-            dist-electron/*.exe
-            dist-electron/*.AppImage
-            dist-electron/*.deb
-            dist-electron/*.rpm
-            dist-electron/*.zip
+            out/*.dmg
+            out/*.exe
+            out/*.AppImage
+            out/*.deb
+            out/*.zip
           if-no-files-found: ignore
           retention-days: 7
 

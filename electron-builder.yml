@@ -1,17 +1,29 @@
-appId: com.yourname.ai-code-app
-productName: AI Code App
+appId: com.srbvik92.aether
+productName: Aether
 directories:
   buildResources: build
 files:
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
-  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.*}'
   - '!{karma.conf.js,rollup.config.js,webpack.config.js}'
+
+# Don't let electron-builder rebuild native modules — postinstall handles it
+npmRebuild: false
+
+# ── Auto-update: publishes to GitHub Releases ─────────────────────────────────
+publish:
+  provider: github
+  owner: srbvik92
+  repo: aether
+  private: true
+
+# ── Windows ───────────────────────────────────────────────────────────────────
 win:
-  executableName: ai-code-app
+  executableName: aether
   target:
     - target: nsis
       arch:
@@ -21,3 +33,20 @@ nsis:
   shortcutName: '${productName}'
   uninstallDisplayName: '${productName}'
   createDesktopShortcut: always
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  artifactName: '${name}-${version}-${arch}.${ext}'
+
+# ── Linux ─────────────────────────────────────────────────────────────────────
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  artifactName: '${name}-${version}-${arch}.${ext}'
