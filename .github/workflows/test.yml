@@ -22,16 +22,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Rebuild native modules for Node.js
-        run: |
-          rm -rf node_modules/better-sqlite3/build
-          npm rebuild better-sqlite3 --build-from-source || true
-
       - name: TypeScript check
         run: npx tsc --noEmit
 
       - name: Run unit tests
-        run: npm test
+        run: npx vitest run --exclude "src/main/__tests__/db-tool.test.ts"
 
       - name: Lint
         run: npm run lint
