@@ -1,7 +1,7 @@
 {
-  "name": "ai-code-app",
+  "name": "aether",
   "version": "1.0.0",
-  "description": "AI coding assistant — BYOK (Bring Your Own Key)",
+  "description": "Aether — AI desktop agent. BYOK, multi-provider, fully local.",
   "main": "out/main/index.js",
   "homepage": "./",
   "author": "You",
