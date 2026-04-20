@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, app } from 'electron'
+import { ipcMain, BrowserWindow, dialog, app, net } from 'electron'
 import { execSync } from 'child_process'
 import { writeFileSync, readdirSync, statSync, readFileSync, existsSync, mkdirSync } from 'fs'
 import { join, relative, extname } from 'path'
@@ -44,7 +44,7 @@ import { withRetry } from './api-retry'
 import { compressToContextWindow } from './context-manager'
 import { log } from './logger'
 import { buildWorkspaceSummary, invalidateCache } from './workspace-indexer'
-import { DiffApprovalFn, setGlobalMemoryPath, setDisabledTools, setCmdApprovalFn, setTrustedCommands, isDangerousCommand } from './tools'
+import { DiffApprovalFn, setGlobalMemoryPath, setDisabledTools, setCmdApprovalFn, setTrustedCommands, isDangerousCommand, killRunningCommand } from './tools'
 import { loadProjectConfig } from './project-config'
 import { startSnapshot, backupFileForSnapshot, finalizeSnapshot, restoreSnapshot, toRelativePath } from './checkpoint'
 import { getGitStatus, getGitDiff, isGitRepo } from './git'
@@ -78,11 +78,11 @@ let cmdCounter = 0
 function genCmdId() { return `cmd-${++cmdCounter}-${Date.now()}` }
 
 function buildCmdApprovalFn(mainWindow: BrowserWindow) {
-  return (command: string, workspace: string, isDangerous: boolean): Promise<boolean> =>
+  return (command: string, workspace: string, isDangerous: boolean, callId?: string): Promise<boolean> =>
     new Promise<boolean>((resolve) => {
       const id = genCmdId()
       pendingCmdApprovals.set(id, resolve)
-      const payload: CmdApprovalPayload = { id, command, workspace, isDangerous }
+      const payload: CmdApprovalPayload = { id, command, workspace, isDangerous, callId }
       mainWindow.webContents.send(IPC.CMD_APPROVAL_REQUEST, payload)
     })
 }
@@ -101,6 +101,61 @@ function buildDiffApprovalFn(mainWindow: BrowserWindow): DiffApprovalFn {
 
 const MEMORY_FILE  = '.ai-memory/notes.md'
 const SUMMARY_FILE = '.ai-context/PROJECT.md'
+
+// ── API error classifier ──────────────────────────────────────────────────────
+function classifyApiError(raw: string, model: string, provider: string): string {
+  const msg = raw.toLowerCase()
+
+  // Model not found / invalid model
+  if (
+    msg.includes('model_not_found') || msg.includes('model not found') ||
+    msg.includes('does not exist') || msg.includes('no such model') ||
+    (msg.includes('404') && (msg.includes('model') || msg.includes('not_found')))
+  ) {
+    return `Model "${model}" is not available for ${provider}. Please select a different model in Settings.`
+  }
+
+  // Authentication / API key issues
+  if (
+    msg.includes('401') || msg.includes('invalid api key') ||
+    msg.includes('authentication') || msg.includes('unauthorized') ||
+    msg.includes('api_key') || msg.includes('invalid_api_key')
+  ) {
+    return `Authentication failed. Your ${provider} API key may be invalid or expired. Please check it in Settings.`
+  }
+
+  // Quota / billing
+  if (
+    msg.includes('quota') || msg.includes('billing') ||
+    msg.includes('insufficient_quota') || msg.includes('credit')
+  ) {
+    return `API quota exceeded for ${provider}. Check your usage limits or billing details.`
+  }
+
+  // Permission denied (model requires higher tier)
+  if (msg.includes('403') || msg.includes('forbidden') || msg.includes('permission')) {
+    return `Access denied for model "${model}". Your ${provider} plan may not include this model.`
+  }
+
+  // Rate limit (429)
+  if (
+    msg.includes('429') || msg.includes('rate limit') || msg.includes('rate_limit') ||
+    msg.includes('too many requests') || msg.includes('ratelimit') ||
+    msg.includes('requests per minute') || msg.includes('tokens per minute')
+  ) {
+    return `Rate limit reached for ${provider}. Wait a moment and try again, or switch to a different model.`
+  }
+
+  // Server errors (5xx)
+  if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504') ||
+      msg.includes('internal server error') || msg.includes('service unavailable') ||
+      msg.includes('bad gateway') || msg.includes('overloaded')) {
+    return `${provider} servers are experiencing issues (server error). Please try again in a moment.`
+  }
+
+  // Return original error if no pattern matched
+  return raw
+}
 
 // ── Webhook helper ────────────────────────────────────────────────────────────
 async function fireWebhook(url: string, payload: Record<string, unknown>): Promise<void> {
@@ -175,6 +230,33 @@ function loadPinnedFiles(workspacePath: string): string {
   } catch { return '' }
 }
 
+// ── OS / shell context (computed once at startup) ────────────────────────────
+const OS_PLATFORM = process.platform  // 'win32' | 'darwin' | 'linux'
+const OS_LABEL    = OS_PLATFORM === 'win32' ? 'Windows' : OS_PLATFORM === 'darwin' ? 'macOS' : 'Linux'
+// Default shell: PowerShell on Windows (available on all modern Windows), bash elsewhere
+const DEFAULT_SHELL = OS_PLATFORM === 'win32' ? 'PowerShell (Windows)' : OS_PLATFORM === 'darwin' ? 'zsh (macOS)' : 'bash (Linux)'
+
+// Commands that differ across platforms — hint the AI to use the right ones
+const OS_COMMAND_HINTS = OS_PLATFORM === 'win32'
+  ? `Commands run in **PowerShell** (powershell.exe). Rules:
+- ALWAYS use PowerShell syntax — never bash syntax.
+- Create directory: \`New-Item -ItemType Directory -Name foo\` or \`mkdir foo\` (mkdir is an alias in PS)
+- List files: \`Get-ChildItem\` or \`ls\` (ls is an alias in PS)
+- Copy: \`Copy-Item src dst\`
+- Move: \`Move-Item src dst\`
+- Delete file: \`Remove-Item file\`
+- Delete directory: \`Remove-Item -Recurse -Force dir\`
+- Environment variable: \`$env:VAR\` (not \$VAR)
+- Chain commands (run regardless of exit code): use separate run_command calls OR \`; \`
+- Chain commands (stop on error): \`cmd1; if ($?) { cmd2 }\` — do NOT use \`&&\` in PS 5.1
+- Read file: \`Get-Content file\` or \`type file\`
+- Grep equivalent: \`Select-String -Pattern "foo" file\`
+- npm, node, python, git, npx all work the same.
+- IMPORTANT: For multi-step setup (mkdir + npm init + npm install), use SEPARATE run_command tool calls — do not chain them all in one command.`
+  : OS_PLATFORM === 'darwin'
+    ? 'Use standard bash/zsh commands. macOS uses BSD versions of tools (e.g. sed, awk may differ from GNU). Use \`open\` to open files/URLs.'
+    : 'Use standard bash commands (GNU/Linux).'
+
 function injectWorkspaceContext(settings: AppSettings): AppSettings {
   const globalMemory   = readGlobalMemoryContent()
   const memory         = settings.workspacePath ? readProjectMemory(settings.workspacePath) : ''
@@ -193,8 +275,9 @@ function injectWorkspaceContext(settings: AppSettings): AppSettings {
     if (projectConfig.disabledTools) merged = { ...merged, disabledTools: projectConfig.disabledTools }
   }
 
-  // Build system prompt additions
-  let extra = ''
+  // ── Always inject OS/shell context first ────────────────────────────────
+  let extra = `\n\n---\n## Environment\n- **OS**: ${OS_LABEL} (${OS_PLATFORM})\n- **Shell**: ${DEFAULT_SHELL}\n- **Workspace**: ${settings.workspacePath || '(none set)'}\n\n${OS_COMMAND_HINTS}\n---`
+
   if (globalMemory)  extra += `\n\n---\n## Global Memory (applies to all projects)\n${globalMemory}\n---`
   if (pinnedFiles)    extra += `\n\n---\n## Pinned Context Files (always in context)\n\n${pinnedFiles}\n---`
   if (projectSummary) extra += `\n\n---\n## Project Summary (.ai-context/PROJECT.md)\n${projectSummary}\n---`
@@ -272,11 +355,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: ChatSendPayload) => {
     const { conversationId, messages, settings: rawSettings } = payload
 
+    // Per-conversation workspace is the ONLY allowed path for file tools.
+    // If the chat has no folder set, clear the global setting so no file
+    // operations are possible — prevents accidental writes to userData or CWD.
+    rawSettings.workspacePath = payload.workspacePath ?? ''
+
     log.info('ipc', 'chat:send', {
       conversationId,
       provider: rawSettings.provider,
       model:    rawSettings.model,
-      messageCount: messages.length
+      messageCount: messages.length,
+      workspace: rawSettings.workspacePath ?? '(none)'
     })
 
     activeStreams.get(conversationId)?.abort.abort()
@@ -292,7 +381,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     setDisabledTools(settingsWithWorkspace.disabledTools ?? [])
 
     // Set up command approval gate for this turn
-    setCmdApprovalFn(buildCmdApprovalFn(mainWindow))
+    // If autoApproveCommands is on, use an approval fn that auto-approves
+    // non-dangerous commands (dangerous ones still get the modal).
+    if (rawSettings.autoApproveCommands) {
+      setCmdApprovalFn((_cmd: string, _workspace: string, isDangerous: boolean, callId?: string): Promise<boolean> => {
+        if (!isDangerous) return Promise.resolve(true)
+        // dangerous → still show modal
+        return buildCmdApprovalFn(mainWindow)(_cmd, _workspace, isDangerous, callId)
+      })
+    } else {
+      setCmdApprovalFn(buildCmdApprovalFn(mainWindow))
+    }
     setTrustedCommands(rawSettings.trustedCommands ?? [])
 
     // Load custom tool plugins from .ai-context/tools/*.js (if workspace set)
@@ -325,11 +424,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       setCustomPlugins([])
     }
 
-    // Notify the UI that context compression may be running (it's quick but async)
-    mainWindow.webContents.send(IPC.CONTEXT_COMPRESSING, { conversationId } as ContextCompressingPayload)
-
     const { messages: trimmedMessages, wasCompressed } = await compressToContextWindow(
-      messages, rawSettings.model, rawSettings
+      messages, rawSettings.model, rawSettings,
+      () => mainWindow.webContents.send(IPC.CONTEXT_COMPRESSING, { conversationId } as ContextCompressingPayload)
     )
 
     if (wasCompressed) {
@@ -488,7 +585,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
         }), { maxRetries: 2, onRetry: (attempt, delay) => {
           onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
         }})
-      } else if (rawSettings.provider === 'openai' || rawSettings.provider === 'custom' || rawSettings.provider === 'nvidia') {
+      } else if (rawSettings.provider === 'openai' || rawSettings.provider === 'custom' || rawSettings.provider === 'nvidia' || rawSettings.provider === 'openrouter') {
         await withRetry(() => runOpenAIAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
           abortSignal: abort.signal
@@ -560,9 +657,42 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       }
     } catch (err: unknown) {
       if (abort.signal.aborted) return
-      log.error('ipc', 'chat:send error', err)
-      const error = err instanceof Error ? err.message : String(err)
-      trackError(error)
+      // Build a detailed log entry — capture OpenAI/Anthropic SDK-specific fields
+      const errDetail: Record<string, unknown> = {
+        message: err instanceof Error ? err.message : String(err),
+        name:    err instanceof Error ? err.name    : typeof err,
+      }
+      if (err instanceof Error) {
+        // OpenAI SDK: status, error (response body), code, type, param, request_id, headers
+        // Anthropic SDK: status, error, request_id, headers
+        for (const key of ['status', 'error', 'code', 'type', 'param', 'request_id'] as const) {
+          const val = (err as Record<string, unknown>)[key]
+          if (val !== undefined) {
+            try { JSON.stringify(val); errDetail[key] = val } catch { errDetail[key] = String(val) }
+          }
+        }
+        // Include headers as plain object (status/retry-after are useful for 429s)
+        const hdrs = (err as Record<string, unknown>).headers
+        if (hdrs && typeof hdrs === 'object') {
+          try {
+            // Headers may be a Headers instance or plain object
+            const hdrObj = typeof (hdrs as { entries?: () => Iterable<[string, string]> }).entries === 'function'
+              ? Object.fromEntries((hdrs as { entries: () => Iterable<[string, string]> }).entries())
+              : JSON.parse(JSON.stringify(hdrs))
+            // Only keep useful, non-sensitive headers
+            const keep = ['retry-after', 'retry-after-ms', 'x-ratelimit-limit-requests',
+                          'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests',
+                          'x-request-id', 'cf-ray', 'content-type']
+            const filtered = Object.fromEntries(Object.entries(hdrObj).filter(([k]) => keep.includes(k.toLowerCase())))
+            if (Object.keys(filtered).length > 0) errDetail.headers = filtered
+          } catch { /* skip headers if they can't be serialised */ }
+        }
+        errDetail.stack = err.stack
+      }
+      log.error('ipc', `chat:send error [${rawSettings.provider}/${rawSettings.model}]`, errDetail)
+      const rawError = err instanceof Error ? err.message : String(err)
+      const error = classifyApiError(rawError, rawSettings.model, rawSettings.provider)
+      trackError(rawError)
       mainWindow.webContents.send(IPC.STREAM_ERROR, { conversationId, error } as StreamErrorPayload)
 
       // ── Webhook: fire on error ──────────────────────────────────────────────
@@ -658,6 +788,57 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       return { path: result.filePaths[0] }
     }
     return { path: null }
+  })
+
+  // ── OpenRouter model list ─────────────────────────────────────────────────
+  // Fetches all available models from OpenRouter. Called on launch and when
+  // the user switches to the openrouter provider. Requires an API key to get
+  // the full list (including paid); public endpoint returns free models only.
+
+  ipcMain.handle(IPC.OPENROUTER_GET_MODELS, async (_e, apiKey?: string) => {
+    try {
+      const headers: Record<string, string> = {
+        'HTTP-Referer': 'https://aether-app',
+        'X-Title':      'Aether'
+      }
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
+
+      // Use Electron's net.fetch — works correctly from the main process
+      const res = await net.fetch('https://openrouter.ai/api/v1/models', { headers })
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+
+      const json = await res.json() as {
+        data: Array<{
+          id:             string
+          name:           string
+          pricing:        { prompt: string; completion: string }
+          context_length: number
+        }>
+      }
+
+      if (!Array.isArray(json.data)) throw new Error('Unexpected response shape')
+
+      const models = json.data
+        .sort((a, b) => {
+          const aFree = a.pricing?.prompt === '0'
+          const bFree = b.pricing?.prompt === '0'
+          if (aFree !== bFree) return aFree ? -1 : 1
+          return a.id.localeCompare(b.id)
+        })
+        .map(m => ({
+          id:            m.id,
+          name:          m.name || m.id,
+          contextLength: m.context_length ?? 0,
+          isFree:        m.pricing?.prompt === '0',
+          promptPrice:   m.pricing?.prompt ?? '',
+        }))
+
+      log.info('openrouter', `Fetched ${models.length} models`)
+      return { ok: true, models }
+    } catch (err) {
+      log.warn('openrouter', 'Failed to fetch models', String(err))
+      return { ok: false, models: [], error: String(err) }
+    }
   })
 
   // ── Auto-updater ──────────────────────────────────────────────────────────
@@ -876,6 +1057,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     const resolver = pendingCmdApprovals.get(id)
     if (resolver) { resolver(approved); pendingCmdApprovals.delete(id) }
     return { ok: true }
+  })
+
+  // ── Kill a running shell command ──────────────────────────────────────────
+  ipcMain.handle(IPC.KILL_COMMAND, (_event, callId: string) => {
+    const killed = killRunningCommand(callId)
+    return { ok: killed }
   })
 
   // ── Auto-title conversations ──────────────────────────────────────────────

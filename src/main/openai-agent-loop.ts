@@ -129,7 +129,13 @@ const OPENAI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Execute a shell command in the workspace directory. Has a 30-second timeout.',
+      description: (() => {
+        const shell = process.platform === 'win32' ? 'PowerShell' : process.platform === 'darwin' ? 'zsh' : 'bash'
+        const hint  = process.platform === 'win32'
+          ? 'Use PowerShell syntax (not bash). E.g. `New-Item -ItemType Directory` not `mkdir -p`, `Remove-Item -Recurse` not `rm -rf`.'
+          : 'Use bash/sh syntax.'
+        return `Execute a shell command. Shell: ${shell}. cwd is always workspace root. ${hint} Do NOT cd into subdirs — use relative paths. Timeout: 5 min for npm/pip/cargo, 30s otherwise.`
+      })(),
       parameters: {
         type: 'object',
         properties: { command: { type: 'string', description: 'Shell command to execute' } },
@@ -410,6 +416,19 @@ const OPENAI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ]
 
+// Filter out workspace-dependent tools when no folder is set
+function getOpenAITools(workspacePath: string): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  if (workspacePath) return OPENAI_TOOLS
+  const WS_TOOLS = new Set([
+    'read_file', 'read_file_range', 'str_replace', 'write_file',
+    'list_directory', 'search_files', 'run_command', 'run_docker',
+    'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit',
+    'semantic_search', 'remember', 'write_plan', 'update_project_summary',
+    'query_database',
+  ])
+  return OPENAI_TOOLS.filter(t => !WS_TOOLS.has(t.function.name))
+}
+
 export async function runOpenAIAgentLoop(
   messages: { role: MessageRole; content: string; images?: ImageAttachment[] }[],
   settings: AppSettings,
@@ -465,7 +484,7 @@ export async function runOpenAIAgentLoop(
           }
       ),
       tools: [
-        ...OPENAI_TOOLS,
+        ...getOpenAITools(settings.workspacePath),
         ...getCustomPlugins().map(p => ({
           type: 'function' as const,
           function: {
@@ -559,7 +578,8 @@ export async function runOpenAIAgentLoop(
         result = await executeTool(
           tc.name, input, settings.workspacePath, callbacks.onDiffRequest,
           (chunk) => callbacks.onToolOutputChunk(tc.id, chunk),
-          settings.braveApiKey
+          settings.braveApiKey,
+          tc.id
         )
       }
 

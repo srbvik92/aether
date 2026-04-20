@@ -267,7 +267,8 @@ function searchFiles(pattern: string, searchPath: string, workspace: string): To
 function runCommand(
   command: string,
   workspace: string,
-  onChunk?: (chunk: string) => void
+  onChunk?: (chunk: string) => void,
+  callId?: string
 ): Promise<ToolResult> {
   if (!workspace) {
     return Promise.resolve({ output: 'No workspace set — cannot run commands without a workspace directory.', isError: true })
@@ -275,36 +276,98 @@ function runCommand(
 
   // ── Approval gate ─────────────────────────────────────────────────────────
   const dangerous = isDangerousCommand(command)
-  const trusted   = !dangerous && _trustedCommands.some(t =>
-    command.trim().toLowerCase().startsWith(t.toLowerCase())
+  const cmdLower  = command.trim().toLowerCase()
+  const trusted   = !dangerous && (
+    ALWAYS_TRUSTED.some(t => cmdLower.startsWith(t.toLowerCase())) ||
+    _trustedCommands.some(t => cmdLower.startsWith(t.toLowerCase()))
   )
 
   if (!trusted && _cmdApprovalFn) {
-    return _cmdApprovalFn(command, workspace, dangerous).then(approved => {
+    return (_cmdApprovalFn as (c: string, w: string, d: boolean, id?: string) => Promise<boolean>)(command, workspace, dangerous, callId).then(approved => {
       if (!approved) {
         return { output: 'Command was not approved by the user. Do not retry this command unless the user explicitly asks.', isError: false }
       }
-      return runCommandImpl(command, workspace, onChunk)
+      return runCommandImpl(command, workspace, onChunk, callId)
     })
   }
 
-  return runCommandImpl(command, workspace, onChunk)
+  return runCommandImpl(command, workspace, onChunk, callId)
+}
+
+// ── Running process registry (for kill support) ───────────────────────────────
+import type { ChildProcess } from 'child_process'
+const _runningProcesses = new Map<string, ChildProcess>()
+// Track IDs that were explicitly killed by the user so the close handler can
+// distinguish a user-kill from a natural exit (Windows signal is always null).
+const _userKilledIds = new Set<string>()
+
+/** Kill a running shell command by its tool call ID. Returns true if found. */
+export function killRunningCommand(callId: string): boolean {
+  const child = _runningProcesses.get(callId)
+  if (!child) return false
+  _userKilledIds.add(callId)      // mark BEFORE deleting so close handler sees it
+  _runningProcesses.delete(callId)
+  try {
+    if (process.platform === 'win32' && child.pid) {
+      // taskkill /T kills the whole process tree (PowerShell + any child procs)
+      const { execSync } = require('child_process') as typeof import('child_process')
+      try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'ignore' }) } catch { /* already gone */ }
+    } else {
+      child.kill('SIGTERM')
+      // Escalate to SIGKILL after 1 s if the process didn't exit cleanly
+      setTimeout(() => { try { child.kill('SIGKILL') } catch { /* already dead */ } }, 1000)
+    }
+  } catch { /* already dead */ }
+  return true
 }
 
 function runCommandImpl(
   command: string,
   workspace: string,
-  onChunk?: (chunk: string) => void
+  onChunk?: (chunk: string) => void,
+  callId?: string
 ): Promise<ToolResult> {
   return new Promise((resolve) => {
-    // Use shell:true so the command string works the same as execSync
-    const child = spawn(command, {
-      cwd:   workspace,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
+    // Force line-buffered / verbose output so tools don't silently buffer
+    const extraEnv: Record<string, string> = {
+      // npm: disable progress bar, enable http-level logging so installs show activity
+      npm_config_progress:    'false',
+      npm_config_loglevel:    'http',
+      // Python: disable output buffering
+      PYTHONUNBUFFERED:       '1',
+      // Generic: no colour (avoids ANSI noise in the output pane)
+      NO_COLOR:               '1',
+      FORCE_COLOR:            '0',
+      // Windows: ensure child processes inherit PATH properly
+      ...(process.platform === 'win32' ? { PATHEXT: process.env.PATHEXT ?? '' } : {})
+    }
+
+    // On Windows: spawn PowerShell directly so that PS cmdlets (New-Item,
+    // Remove-Item, $env:VAR, etc.) work and so the process can be killed cleanly.
+    // On macOS/Linux: use the default shell via shell:true.
+    const child = process.platform === 'win32'
+      ? spawn('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy', 'Bypass',
+          '-Command', command
+        ], {
+          cwd:   workspace,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env:   { ...process.env, ...extraEnv }
+        })
+      : spawn(command, {
+          cwd:   workspace,
+          shell: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env:   { ...process.env, ...extraEnv }
+        })
+
+    // Register so it can be killed externally
+    if (callId) _runningProcesses.set(callId, child)
 
     let combined = ''
+    let killedByUser = false
 
     const handleData = (data: Buffer) => {
       const chunk = data.toString('utf-8')
@@ -315,17 +378,40 @@ function runCommandImpl(
     child.stdout.on('data', handleData)
     child.stderr.on('data', handleData)
 
-    // Hard 30-second timeout
+    // Use a longer timeout for package manager / build commands that can be slow
+    const isSlowCommand = /\b(npm|yarn|pnpm|bun)\s+(install|i|ci|build|run|add|remove|update)\b/i.test(command)
+      || /\b(pip|pip3|cargo|go get|go build|mvn|gradle|composer)\b/i.test(command)
+      || /\b(npx|bunx)\b/i.test(command)
+    const timeoutMs = isSlowCommand ? 300_000 : 30_000  // 5 min for slow, 30s otherwise
+    const timeoutLabel = isSlowCommand ? '5 min' : '30s'
+
     const timer = setTimeout(() => {
+      if (callId) _runningProcesses.delete(callId)
       child.kill('SIGKILL')
       resolve({
-        output:  cap((combined.trim() || '(no output)') + '\n\n[timed out after 30s]'),
+        output:  cap((combined.trim() || '(no output)') + `\n\n[timed out after ${timeoutLabel}]`),
         isError: true
       })
-    }, 30_000)
+    }, timeoutMs)
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       clearTimeout(timer)
+      if (callId) _runningProcesses.delete(callId)
+
+      // Killed by user via killRunningCommand():
+      // On Unix the signal is SIGTERM/SIGKILL; on Windows signal is always null
+      // after taskkill, so we track kills in _userKilledIds instead.
+      const wasUserKilled = (callId ? _userKilledIds.delete(callId) : false)
+        || signal === 'SIGTERM'
+        || signal === 'SIGKILL'
+      killedByUser = wasUserKilled
+      if (wasUserKilled) {
+        return resolve({
+          output: cap((combined.trim() || '(no output)') + '\n\n[Command was stopped by the user.]'),
+          isError: false
+        })
+      }
+
       const out = combined.trim() || '(command completed with no output)'
 
       // Detect test-runner failures and add an explicit directive so the agent
@@ -357,6 +443,7 @@ function runCommandImpl(
 
     child.on('error', (err) => {
       clearTimeout(timer)
+      if (callId) _runningProcesses.delete(callId)
       resolve({ output: cap(err.message), isError: true })
     })
   })
@@ -800,7 +887,8 @@ export async function executeTool(
   workspacePath: string,
   onDiffRequest?: DiffApprovalFn,
   onOutputChunk?: (chunk: string) => void,
-  braveApiKey?: string
+  braveApiKey?: string,
+  callId?: string
 ): Promise<ToolResult> {
   // Check disabled tools first (set by project config)
   if (_disabledTools.has(name)) {
@@ -836,7 +924,7 @@ export async function executeTool(
       case 'search_files':
         return searchFiles(input.pattern as string, (input.path as string) || '.', workspacePath)
       case 'run_command':
-        return runCommand(input.command as string, workspacePath, onOutputChunk)
+        return runCommand(input.command as string, workspacePath, onOutputChunk, callId)
       case 'git_status':
         return toolGitStatus(workspacePath)
       case 'git_diff':
@@ -1010,10 +1098,15 @@ export const ANTHROPIC_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'run_command',
-    description:
-      'Execute a shell command in the workspace directory. ' +
-      'Use for running tests, installing packages, building, linting, etc. ' +
-      'Commands run in the workspace root by default. Has a 30-second timeout.',
+    description: (() => {
+      const shell = process.platform === 'win32' ? 'PowerShell' : process.platform === 'darwin' ? 'zsh' : 'bash'
+      const hint  = process.platform === 'win32'
+        ? 'Use PowerShell syntax (not bash). E.g. `Remove-Item -Recurse` not `rm -rf`, `$env:VAR` not `$VAR`.'
+        : 'Use bash/sh syntax.'
+      return `Execute a shell command in the workspace root (cwd is always the workspace folder). Shell: ${shell}. ${hint} ` +
+             'Do NOT cd into subdirectories — use relative paths instead. ' +
+             'Timeout: 5 minutes for npm/yarn/pip/cargo/build commands, 30 seconds for everything else.'
+    })(),
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -1310,3 +1403,22 @@ export const ANTHROPIC_TOOLS: Anthropic.Tool[] = [
     }
   },
 ]
+
+// Tools that require a workspace folder — excluded from the AI's tool list when
+// no folder is attached to the conversation, so the model never tries to use them.
+const WORKSPACE_TOOL_NAMES = new Set([
+  'read_file', 'read_file_range', 'str_replace', 'write_file',
+  'list_directory', 'search_files', 'run_command', 'run_docker',
+  'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit',
+  'semantic_search', 'remember', 'write_plan', 'update_project_summary',
+  'query_database',
+])
+
+/**
+ * Returns the Anthropic tool list, filtered based on whether a workspace is set.
+ * When workspacePath is empty, only web/browser tools are included.
+ */
+export function getAnthropicTools(workspacePath: string): Anthropic.Tool[] {
+  if (workspacePath) return ANTHROPIC_TOOLS
+  return ANTHROPIC_TOOLS.filter(t => !WORKSPACE_TOOL_NAMES.has(t.name))
+}

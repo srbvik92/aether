@@ -51,9 +51,18 @@ declare global {
       setTitleBarTheme:      (theme: 'dark' | 'light') => Promise<{ ok: boolean }>
       exportChat:            (payload: ExportChatPayload) => Promise<{ ok: boolean }>
       pickFolder:            () => Promise<{ path: string | null }>
+      getOpenRouterModels:   (apiKey?: string) => Promise<{
+        ok: boolean
+        models: Array<{ id: string; name: string; contextLength: number; isFree: boolean; promptPrice: string }>
+        error?: string
+      }>
       // Diff viewer
       onDiffRequest:         (cb: (payload: DiffRequestPayload) => void) => void
       respondDiff:           (payload: DiffResponsePayload) => Promise<{ ok: boolean }>
+      // Platform
+      platform:              'win32' | 'darwin' | 'linux'
+      // Kill running shell command
+      killCommand:           (callId: string) => Promise<{ ok: boolean }>
       // Git
       getGitStatus:          (workspacePath: string) => Promise<GitStatusSummary>
       // Terminal / PTY

@@ -57,6 +57,10 @@ Desktop.ini
 coverage/
 .nyc_output/
 
+# ── Playwright E2E artifacts ──────────────────────────────────────────────────
+playwright-report/
+test-results/
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 .eslintcache
 .parcel-cache/

@@ -72,7 +72,7 @@ function StepDots({ current }: { current: Step }) {
 }
 
 // ── Welcome ───────────────────────────────────────────────────────────────────
-function WelcomeStep({ onNext }: { onNext: () => void }) {
+function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
   return (
     <div className="flex flex-col items-center text-center gap-6">
       <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center shadow-xl">
@@ -81,7 +81,7 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
         </svg>
       </div>
       <div>
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-3">Welcome to AI Code App</h1>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-3">Welcome to Aether</h1>
         <p className="text-gray-500 dark:text-gray-400 max-w-sm leading-relaxed">
           Your AI coding assistant that runs entirely on your machine. Bring your own API key — your code and conversations never leave your device.
         </p>
@@ -105,6 +105,12 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
         autoFocus
       >
         Get started →
+      </button>
+      <button
+        onClick={onSkip}
+        className="text-xs text-gray-400 hover:text-gray-500 dark:hover:text-gray-300 transition-colors"
+      >
+        Skip setup, I'll configure later
       </button>
     </div>
   )
@@ -417,6 +423,12 @@ export default function OnboardingWizard({ settings, onFinish }: Props) {
     onFinish(updated)
   }
 
+  const handleSkip = async () => {
+    const updated: AppSettings = { ...settings, onboardingComplete: true }
+    if (window.api) await window.api.saveSettings(updated)
+    onFinish(updated)
+  }
+
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-50 dark:bg-gray-950 p-4"
@@ -427,7 +439,7 @@ export default function OnboardingWizard({ settings, onFinish }: Props) {
       <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-3xl shadow-2xl p-8 border border-gray-200 dark:border-gray-800">
         <StepDots current={step} />
 
-        {step === 'welcome'   && <WelcomeStep onNext={goNext} />}
+        {step === 'welcome'   && <WelcomeStep onNext={goNext} onSkip={handleSkip} />}
         {step === 'provider'  && <ProviderStep selected={provider} onSelect={setProvider} onNext={goNext} onBack={goBack} />}
         {step === 'apikey'    && (
           <ApiKeyStep

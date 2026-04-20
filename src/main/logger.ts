@@ -96,10 +96,46 @@ function write(level: Level, tag: string, msg: string, data?: unknown): void {
 
 // ── Serialise errors safely ───────────────────────────────────────────────────
 function serializeError(err: unknown): unknown {
-  if (err instanceof Error) {
-    return { name: err.name, message: err.message, stack: err.stack }
+  if (!(err instanceof Error)) return err
+
+  // Start with the basics
+  const base: Record<string, unknown> = {
+    name:    err.name,
+    message: err.message,
+    stack:   err.stack,
   }
-  return err
+
+  // Capture all own enumerable properties on the error object
+  // (Anthropic SDK adds: status, headers, error, request_id, cause)
+  // (OpenAI SDK adds: status, headers, error, code, param, type)
+  // (Fetch/net errors add: cause, code)
+  for (const key of Object.keys(err as object)) {
+    if (key === 'name' || key === 'message' || key === 'stack') continue
+    try {
+      const val = (err as Record<string, unknown>)[key]
+      // Avoid circular refs / unserializable objects — stringify test
+      JSON.stringify(val)
+      base[key] = val
+    } catch {
+      base[key] = String((err as Record<string, unknown>)[key])
+    }
+  }
+
+  // Also check non-enumerable API fields often set directly on prototype instances
+  for (const key of ['status', 'statusCode', 'code', 'type', 'param', 'error', 'request_id', 'cause'] as const) {
+    if (key in base) continue   // already captured
+    const val = (err as Record<string, unknown>)[key]
+    if (val !== undefined) {
+      try {
+        JSON.stringify(val)
+        base[key] = val
+      } catch {
+        base[key] = String(val)
+      }
+    }
+  }
+
+  return base
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

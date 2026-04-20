@@ -1,6 +1,6 @@
 // ─── Provider & Settings ───────────────────────────────────────────────────
 
-export type Provider = 'anthropic' | 'openai' | 'gemini' | 'nvidia' | 'custom'
+export type Provider = 'anthropic' | 'openai' | 'gemini' | 'nvidia' | 'openrouter' | 'custom'
 
 /** A user-saved custom provider entry (OpenAI-compatible endpoint) */
 export interface CustomProviderConfig {
@@ -88,6 +88,11 @@ export interface AppSettings {
   // When true (default), the AI pauses before writing any file and shows a
   // diff for the user to approve or reject — identical to Claude Code's flow.
   requireEditApproval?: boolean
+
+  // ── Command approval ──────────────────────────────────────────────────────
+  // When true, all non-dangerous commands run without the approval modal.
+  // Dangerous commands (rm -rf, git reset --hard, etc.) always require approval.
+  autoApproveCommands?: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -314,15 +319,17 @@ export const PROVIDER_MODELS: Record<Provider, string[]> = {
     'marin/marin-8b-instruct',
     'igenius/colosseum_355b_instruct_16k',
   ],
-  custom: []   // models come from saved CustomProviderConfig entries
+  openrouter: [], // populated dynamically at launch from https://openrouter.ai/api/v1/models
+  custom: []      // models come from saved CustomProviderConfig entries
 }
 
 export const PROVIDER_BASE_URLS: Record<Provider, string> = {
-  anthropic: 'https://api.anthropic.com',
-  openai:    'https://api.openai.com/v1',
-  gemini:    '',                                // uses GCP project + location
-  nvidia:    'https://integrate.api.nvidia.com/v1',
-  custom:    'http://localhost:11434/v1'
+  anthropic:   'https://api.anthropic.com',
+  openai:      'https://api.openai.com/v1',
+  gemini:      '',                                // uses GCP project + location
+  nvidia:      'https://integrate.api.nvidia.com/v1',
+  openrouter:  'https://openrouter.ai/api/v1',
+  custom:      'http://localhost:11434/v1'
 }
 
 export const VERTEX_LOCATIONS = [
@@ -345,13 +352,14 @@ export const VERTEX_LOCATIONS = [
 // ─── Tool use ─────────────────────────────────────────────────────────────
 
 export interface ToolCallDisplay {
-  id:          string
-  name:        string
-  input:       Record<string, unknown>
-  output?:     string
-  liveOutput?: string   // streaming output while status === 'running'
-  isError:     boolean
-  status:      'running' | 'done' | 'error'
+  id:                string
+  name:              string
+  input:             Record<string, unknown>
+  output?:           string
+  liveOutput?:       string   // streaming output while status === 'running'
+  isError:           boolean
+  status:            'running' | 'done' | 'error' | 'awaiting-approval'
+  approvalId?:       string   // set while waiting for cmd approval — used to reject via Stop
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
@@ -390,6 +398,7 @@ export interface Conversation {
   model: string
   tags?: string[]
   mode?: ConversationMode
+  workspacePath?: string  // per-conversation folder; AI tools are restricted to this path
 }
 
 // ─── Shell command approval ────────────────────────────────────────────────
@@ -399,6 +408,7 @@ export interface CmdApprovalPayload {
   command:     string
   workspace:   string
   isDangerous: boolean   // true when command matches a known destructive pattern
+  callId?:     string    // tool call ID — used to link approval to the tool card in the UI
 }
 
 // ─── Per-project config (.chatui / .chatui.json in workspace root) ─────────
@@ -445,7 +455,8 @@ export const IPC = {
   STREAM_ERROR:       'stream:error',
   SET_TITLEBAR_THEME: 'window:setTitleBarTheme',
   EXPORT_CHAT:        'chat:export',
-  PICK_FOLDER:        'dialog:pickFolder',
+  PICK_FOLDER:            'dialog:pickFolder',
+  OPENROUTER_GET_MODELS:  'openrouter:getModels',
   TOOL_CALL_START:    'tool:start',
   TOOL_CALL_RESULT:   'tool:result',
   TOOL_OUTPUT_CHUNK:  'tool:outputChunk',
@@ -496,8 +507,10 @@ export const IPC = {
   PROMPT_SAVE:            'prompts:save',           // invoke — create or update a prompt
   PROMPT_DELETE:          'prompts:delete',         // invoke — delete a prompt by id
   // Shell command approval
-  CMD_APPROVAL_REQUEST:   'cmd:approvalRequest',    // push  — AI wants to run a command
+  CMD_APPROVAL_REQUEST:   'cmd:approvalRequest',    // push  — AI wants to run a command (shows modal)
+  CMD_APPROVAL_PENDING:   'cmd:approvalPending',    // push  — links approvalId to a tool callId
   CMD_APPROVAL_RESPONSE:  'cmd:approvalResponse',   // invoke — user approved/rejected
+  KILL_COMMAND:           'cmd:kill',               // invoke — kill a running shell command by callId
   // Auto-title conversations
   CONV_AUTO_TITLE:        'conv:autoTitle',          // invoke — generate title from first msg
   // Pinned context files
@@ -644,6 +657,7 @@ export interface ChatSendPayload {
   messages: { role: MessageRole; content: string; images?: ImageAttachment[] }[]
   settings: AppSettings
   mode?: ConversationMode
+  workspacePath?: string  // per-conversation folder override
 }
 
 /** Model prefixes/names that support extended reasoning / thinking */

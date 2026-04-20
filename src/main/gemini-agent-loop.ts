@@ -122,7 +122,13 @@ const GEMINI_FUNCTIONS: FunctionDeclaration[] = [
   },
   {
     name: 'run_command',
-    description: 'Execute a shell command in the workspace directory. Has a 30-second timeout.',
+    description: (() => {
+      const shell = process.platform === 'win32' ? 'PowerShell' : process.platform === 'darwin' ? 'zsh' : 'bash'
+      const hint  = process.platform === 'win32'
+        ? 'Use PowerShell syntax (not bash). E.g. `New-Item -ItemType Directory` not `mkdir -p`.'
+        : 'Use bash/sh syntax.'
+      return `Execute a shell command in the workspace root. Shell: ${shell}. ${hint} Timeout: 5 min for npm/pip/cargo, 30s otherwise.`
+    })(),
     parameters: {
       type: 'object',
       properties: {
@@ -344,6 +350,19 @@ const GEMINI_FUNCTIONS: FunctionDeclaration[] = [
 
 const GEMINI_TOOLS: Tool[] = [{ functionDeclarations: GEMINI_FUNCTIONS }]
 
+const GEMINI_WS_TOOLS = new Set([
+  'read_file', 'read_file_range', 'str_replace', 'write_file',
+  'list_directory', 'search_files', 'run_command', 'run_docker',
+  'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit',
+  'semantic_search', 'remember', 'write_plan', 'update_project_summary',
+  'query_database',
+])
+
+function getGeminiFunctions(workspacePath: string): FunctionDeclaration[] {
+  if (workspacePath) return GEMINI_FUNCTIONS
+  return GEMINI_FUNCTIONS.filter(f => !GEMINI_WS_TOOLS.has(f.name ?? ''))
+}
+
 // ── Build the GoogleGenAI client ──────────────────────────────────────────────
 // Supports two modes:
 //   1. Vertex AI  — vertexProjectId is set → uses service account JSON or ADC
@@ -440,7 +459,7 @@ export async function runGeminiAgentLoop(
   const config: GenerateContentConfig = {
     maxOutputTokens: maxTokens,
     ...(settings.temperature !== undefined && { temperature: settings.temperature }),
-    tools:           [{ functionDeclarations: [...GEMINI_FUNCTIONS, ...getMcpFunctionsForGemini()] }],
+    tools:           [{ functionDeclarations: [...getGeminiFunctions(settings.workspacePath), ...getMcpFunctionsForGemini()] }],
     ...(systemText ? { systemInstruction: systemText } : {}),
     // Thinking budget: only set for gemini-2.5+ models when depth is explicitly chosen
     ...(thinkingBudget !== undefined && {
@@ -559,7 +578,8 @@ export async function runGeminiAgentLoop(
         result = await executeTool(
           fc.name, input, settings.workspacePath, callbacks.onDiffRequest,
           (chunk) => callbacks.onToolOutputChunk(callId, chunk),
-          settings.braveApiKey
+          settings.braveApiKey,
+          callId
         )
       }
 

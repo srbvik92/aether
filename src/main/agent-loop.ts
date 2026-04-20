@@ -17,7 +17,7 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import { AppSettings, MessageRole, ImageAttachment, supportsReasoningDepth } from '../shared/types'
-import { ANTHROPIC_TOOLS, getCustomToolDefinitions, executeTool, runAutoValidator, DiffApprovalFn } from './tools'
+import { getAnthropicTools, getCustomToolDefinitions, executeTool, runAutoValidator, DiffApprovalFn } from './tools'
 import { getActiveMcpTools, callMcpTool } from './mcp-client'
 
 /** Convert active MCP servers' tools into Anthropic tool definitions. */
@@ -161,7 +161,7 @@ export async function runAnthropicAgentLoop(
       ...(useThinking && { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } as any),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       system:     systemWithCache as any,
-      tools:      [...ANTHROPIC_TOOLS, ...getCustomToolDefinitions(), ...getMcpToolsForAnthropic()],
+      tools:      [...getAnthropicTools(settings.workspacePath), ...getCustomToolDefinitions(), ...getMcpToolsForAnthropic()],
       messages:   cachedHistory
     })
 
@@ -232,7 +232,8 @@ export async function runAnthropicAgentLoop(
         result = await executeTool(
           toolBlock.name, input, settings.workspacePath, callbacks.onDiffRequest,
           (chunk) => callbacks.onToolOutputChunk(toolBlock.id, chunk),
-          settings.braveApiKey
+          settings.braveApiKey,
+          toolBlock.id
         )
       }
 

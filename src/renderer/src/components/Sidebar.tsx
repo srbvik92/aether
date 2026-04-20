@@ -24,7 +24,7 @@ interface Props {
   conversations:       Conversation[]
   activeConvId:        string | null
   settings:            AppSettings
-  onNew:               () => void
+  onNew:               (workspacePath?: string) => void
   onSelect:            (id: string) => void
   onDelete:            (id: string) => void
   onRename:            (id: string, title: string) => void
@@ -203,6 +203,29 @@ export default function Sidebar({
     return matchSearch && matchTag
   })
 
+  // Group conversations by workspace path.
+  // Conversations without a workspacePath go into the '' bucket (shown as "General").
+  const grouped = useMemo(() => {
+    const map = new Map<string, Conversation[]>()
+    for (const c of filtered) {
+      const key = c.workspacePath ?? ''
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push(c)
+    }
+    // Sort: workspaces alphabetically, general (no folder) last
+    const keys = [...map.keys()].sort((a, b) => {
+      if (a === '') return 1
+      if (b === '') return -1
+      return a.localeCompare(b)
+    })
+    return keys.map(key => ({ workspace: key, convs: map.get(key)! }))
+  }, [filtered])
+
+  // Only show folder headers when there are multiple groups OR at least one workspace group
+  const showGroups = grouped.length > 1 || (grouped.length === 1 && grouped[0].workspace !== '')
+
+  const folderLabel = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path
+
   return (
     <div className="w-64 flex flex-col bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
 
@@ -268,7 +291,37 @@ export default function Sidebar({
           </p>
         )}
 
-        {filtered.map((conv) => (
+        {grouped.map(({ workspace, convs }) => (
+          <React.Fragment key={workspace || '__general__'}>
+
+            {/* Folder header — shown when there are multiple groups */}
+            {showGroups && (
+              <div className="flex items-center gap-1.5 px-1 pt-3 pb-1 first:pt-1">
+                <svg className="w-3 h-3 text-gray-400 dark:text-gray-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+                </svg>
+                <span
+                  className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-600 truncate flex-1"
+                  title={workspace || 'General'}
+                >
+                  {workspace ? folderLabel(workspace) : 'General'}
+                </span>
+                {/* New chat in this folder */}
+                {workspace && (
+                  <button
+                    onClick={() => onNew(workspace)}
+                    title={`New chat in ${folderLabel(workspace)}`}
+                    className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:text-blue-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            )}
+
+        {convs.map((conv) => (
           <React.Fragment key={conv.id}>
           <div
             role="listitem"
@@ -376,6 +429,8 @@ export default function Sidebar({
               onClose={() => setTagPickerConvId(null)}
             />
           )}
+          </React.Fragment>
+        ))}
           </React.Fragment>
         ))}
       </div>

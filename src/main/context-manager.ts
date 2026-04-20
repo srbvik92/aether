@@ -127,7 +127,8 @@ async function callSummaryModel(msgs: Message[], settings: AppSettings): Promise
 export async function compressToContextWindow(
   messages: Message[],
   model:    string,
-  settings: AppSettings
+  settings: AppSettings,
+  onCompressingStart?: () => void
 ): Promise<{ messages: Message[]; wasCompressed: boolean; wasTrimmed: boolean }> {
 
   const contextWindow = CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT
@@ -150,6 +151,9 @@ export async function compressToContextWindow(
   if (convoMsgs.length < MIN_MESSAGES_TO_COMPRESS) {
     return { messages, wasCompressed: false, wasTrimmed: false }
   }
+
+  // Notify UI that compression is actually starting
+  onCompressingStart?.()
 
   // Split: summarize oldest 60%, keep newest 40%
   const keepCount  = Math.max(4, Math.floor(convoMsgs.length * KEEP_RECENT_RATIO))

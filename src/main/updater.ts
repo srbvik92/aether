@@ -17,6 +17,7 @@
 import { BrowserWindow, app } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { IPC, UpdateStatusPayload } from '../shared/types'
+import { log } from './logger'
 
 export function initUpdater(mainWindow: BrowserWindow): void {
   // Only run in packaged builds — in dev there is no update server
@@ -26,8 +27,13 @@ export function initUpdater(mainWindow: BrowserWindow): void {
   autoUpdater.autoDownload        = false  // user decides when to download
   autoUpdater.autoInstallOnAppQuit = true  // install silently on normal quit after download
 
-  // Reduce logging noise in production
-  autoUpdater.logger = null
+  // Wire to app logger so update events appear in the log viewer
+  autoUpdater.logger = {
+    info:  (msg: unknown) => log.info('updater', String(msg)),
+    warn:  (msg: unknown) => log.warn('updater', String(msg)),
+    error: (msg: unknown) => log.error('updater', String(msg)),
+    debug: (msg: unknown) => log.debug('updater', String(msg)),
+  }
 
   // ── Helper to push status to renderer ────────────────────────────────────
   const send = (payload: UpdateStatusPayload) => {
@@ -64,10 +70,13 @@ export function initUpdater(mainWindow: BrowserWindow): void {
   })
 
   autoUpdater.on('error', (err) => {
-    // Don't surface "No published versions" — that just means the repo
-    // has no GitHub Release yet, which is normal during early development.
     const msg = err?.message ?? String(err)
+    // Silently swallow expected non-fatal conditions:
+    // - "No published versions" → repo exists but no release yet
+    // - "404" → private repo atom feed inaccessible without token (normal)
+    // - "HttpError: 404" → same via electron-updater's HTTP client
     if (msg.includes('No published versions')) return
+    if (msg.includes('404')) return
     send({ type: 'error', message: msg })
   })
 

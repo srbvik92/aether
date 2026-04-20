@@ -6,15 +6,16 @@ import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/pris
 import { ChatMessage, AppSettings, ToolCallDisplay, ChangedFile } from '../../../shared/types'
 
 interface Props {
-  message:       ChatMessage
-  settings:      AppSettings
-  isLastAI?:     boolean    // show Regenerate button on last AI message
-  chatStreaming?: boolean    // disable actions while anything is streaming
-  onEdit?:       (id: string, newContent: string) => void
-  onRegenerate?: (id: string) => void
-  onBranch?:     (id: string) => void
-  onRate?:       (id: string, rating: 'up' | 'down') => void
-  onOpenFile?:   (path: string) => void
+  message:          ChatMessage
+  settings:         AppSettings
+  isLastAI?:        boolean    // show Regenerate button on last AI message
+  chatStreaming?:    boolean    // disable actions while anything is streaming
+  onEdit?:          (id: string, newContent: string) => void
+  onRegenerate?:    (id: string) => void
+  onBranch?:        (id: string) => void
+  onRate?:          (id: string, rating: 'up' | 'down') => void
+  onOpenFile?:      (path: string) => void
+  onOpenSettings?:  () => void  // for "Change model" action on model errors
 }
 
 // ── Copy button ───────────────────────────────────────────────────────────────
@@ -171,53 +172,81 @@ function CodeBlock({ language, code, isDark }: { language: string; code: string;
 }
 
 // ── Tool icon by name ─────────────────────────────────────────────────────────
-function toolIcon(name: string): string {
+export function toolIcon(name: string): string {
   switch (name) {
-    case 'read_file':       return '📄'
-    case 'write_file':      return '✏️'
-    case 'list_directory':  return '📁'
-    case 'search_files':    return '🔍'
-    case 'run_command':     return '⚡'
-    case 'git_status':      return '🌿'
-    case 'git_diff':        return '↕️'
-    case 'git_log':         return '📜'
-    case 'git_add':         return '➕'
-    case 'git_commit':      return '💾'
-    case 'semantic_search': return '🧠'
-    case 'remember':        return '💾'
-    default:                return '🔧'
+    case 'read_file':             return '📄'
+    case 'read_file_range':       return '📄'
+    case 'write_file':            return '✏️'
+    case 'str_replace':           return '✏️'
+    case 'list_directory':        return '📁'
+    case 'search_files':          return '🔍'
+    case 'run_command':           return '⚡'
+    case 'run_docker':            return '🐳'
+    case 'git_status':            return '🌿'
+    case 'git_diff':              return '↕️'
+    case 'git_log':               return '📜'
+    case 'git_add':               return '➕'
+    case 'git_commit':            return '💾'
+    case 'semantic_search':       return '🧠'
+    case 'remember':              return '🧠'
+    case 'remember_globally':     return '🧠'
+    case 'write_plan':            return '📋'
+    case 'update_project_summary':return '📋'
+    case 'fetch_url':             return '🌐'
+    case 'web_search':            return '🔎'
+    case 'query_database':        return '🗄️'
+    case 'browser_navigate':      return '🌐'
+    case 'browser_screenshot':    return '📸'
+    case 'browser_click':         return '🖱️'
+    case 'browser_fill':          return '⌨️'
+    default:                      return '🔧'
   }
 }
 
-function toolLabel(name: string): string {
+export function toolLabel(name: string): string {
   switch (name) {
-    case 'read_file':       return 'Read file'
-    case 'write_file':      return 'Write file'
-    case 'list_directory':  return 'List directory'
-    case 'search_files':    return 'Search files'
-    case 'run_command':     return 'Run command'
-    case 'git_status':      return 'Git status'
-    case 'git_diff':        return 'Git diff'
-    case 'git_log':         return 'Git log'
-    case 'git_add':         return 'Git add'
-    case 'git_commit':      return 'Git commit'
-    case 'semantic_search': return 'Semantic search'
-    case 'remember':        return 'Save to memory'
-    default:                return name
+    case 'read_file':             return 'Reading file'
+    case 'read_file_range':       return 'Reading file'
+    case 'write_file':            return 'Writing file'
+    case 'str_replace':           return 'Editing file'
+    case 'list_directory':        return 'Listing directory'
+    case 'search_files':          return 'Searching files'
+    case 'run_command':           return 'Running command'
+    case 'run_docker':            return 'Running in Docker'
+    case 'git_status':            return 'Checking git status'
+    case 'git_diff':              return 'Checking git diff'
+    case 'git_log':               return 'Checking git log'
+    case 'git_add':               return 'Staging files'
+    case 'git_commit':            return 'Committing'
+    case 'semantic_search':       return 'Searching codebase'
+    case 'remember':              return 'Saving to memory'
+    case 'remember_globally':     return 'Saving to memory'
+    case 'write_plan':            return 'Writing plan'
+    case 'update_project_summary':return 'Updating summary'
+    case 'fetch_url':             return 'Fetching URL'
+    case 'web_search':            return 'Searching web'
+    case 'query_database':        return 'Querying database'
+    case 'browser_navigate':      return 'Navigating browser'
+    case 'browser_screenshot':    return 'Taking screenshot'
+    case 'browser_click':         return 'Clicking'
+    case 'browser_fill':          return 'Filling form'
+    default:                      return name.replace(/_/g, ' ')
   }
 }
 
 // ── Tool call card ────────────────────────────────────────────────────────────
 function ToolCallCard({ call }: { call: ToolCallDisplay }) {
-  const [expanded, setExpanded] = useState(false)
+  const isShellLike = ['run_command', 'run_docker'].includes(call.name)
+  // Shell commands start expanded so the terminal is always visible
+  const [expanded, setExpanded] = useState(isShellLike)
   const liveRef = useRef<HTMLPreElement>(null)
 
-  // Auto-scroll live output to bottom as new chunks arrive
+  // Auto-scroll terminal to bottom as new chunks arrive
   useEffect(() => {
-    if (call.liveOutput && liveRef.current) {
+    if (liveRef.current) {
       liveRef.current.scrollTop = liveRef.current.scrollHeight
     }
-  }, [call.liveOutput])
+  }, [call.liveOutput, call.output])
 
   const subtitle = call.input.path
     ? String(call.input.path)
@@ -236,15 +265,20 @@ function ToolCallCard({ call }: { call: ToolCallDisplay }) {
                 : null
 
   const isRunning  = call.status === 'running'
+  const isAwaiting = call.status === 'awaiting-approval'
   const isError    = call.status === 'error' || call.isError
-  const hasLive    = isRunning && !!call.liveOutput
-  const canExpand  = !isRunning && !!call.output
+  const isDone     = call.status === 'done'
+  const hasLive    = isRunning   // always show terminal pane when running
+  const isShellCmd = ['run_command', 'run_docker'].includes(call.name)
+  // Shell cmds: always expandable when done (show terminal); others: only when there's output
+  const canExpand  = !isRunning && !isAwaiting && (isShellCmd ? isDone || isError : !!call.output)
 
   return (
     <div className={`my-2 rounded-xl border text-xs overflow-hidden transition-colors ${
-      isError   ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20' :
-      isRunning ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20' :
-                  'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50'
+      isError    ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20' :
+      isAwaiting ? 'border-yellow-300 dark:border-yellow-700 bg-yellow-50 dark:bg-yellow-900/20' :
+      isRunning  ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20' :
+                   'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50'
     }`}>
       {/* Header row */}
       <div
@@ -257,7 +291,14 @@ function ToolCallCard({ call }: { call: ToolCallDisplay }) {
           <span className="font-mono text-gray-400 dark:text-gray-500 truncate max-w-[260px]">{subtitle}</span>
         )}
         <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
-          {isRunning ? (
+          {isAwaiting ? (
+            <span className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 font-medium">
+              <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              Awaiting your approval
+            </span>
+          ) : isRunning ? (
             <span className="flex items-center gap-1 text-blue-500 dark:text-blue-400">
               <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
@@ -270,6 +311,39 @@ function ToolCallCard({ call }: { call: ToolCallDisplay }) {
           ) : (
             <span className="text-green-600 dark:text-green-400">✓ Done</span>
           )}
+          {/* Stop button — kills running process OR rejects pending approval */}
+          {(isRunning || isAwaiting) && isShellCmd && typeof window !== 'undefined' && window.api && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                if (isAwaiting && call.approvalId) {
+                  window.api.respondCmdApproval(call.approvalId, false)
+                } else {
+                  window.api.killCommand(call.id)
+                }
+              }}
+              title={isAwaiting ? 'Reject this command' : 'Stop this command'}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-800/60 border border-red-200 dark:border-red-700 transition-colors"
+            >
+              <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+              </svg>
+              {isAwaiting ? 'Reject' : 'Stop'}
+            </button>
+          )}
+          {/* Approve button — shown when awaiting approval */}
+          {isAwaiting && call.approvalId && typeof window !== 'undefined' && window.api && (
+            <button
+              onClick={(e) => { e.stopPropagation(); window.api.respondCmdApproval(call.approvalId!, true) }}
+              title="Approve and run this command"
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-800/60 border border-green-200 dark:border-green-700 transition-colors"
+            >
+              <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+              </svg>
+              Approve
+            </button>
+          )}
           {canExpand && (
             <svg
               className={`w-3.5 h-3.5 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
@@ -281,21 +355,53 @@ function ToolCallCard({ call }: { call: ToolCallDisplay }) {
         </div>
       </div>
 
-      {/* Live streaming output — visible while running */}
-      {hasLive && (
-        <div className="border-t border-blue-200 dark:border-blue-800">
+      {/* ── Mini terminal — shown for shell commands while running or after completion ── */}
+      {isShellCmd && (hasLive || (canExpand && expanded)) && (
+        <div className="border-t border-gray-700/60 rounded-b-xl overflow-hidden">
+          {/* Terminal title bar */}
+          <div className="flex items-center justify-between px-3 py-1.5 bg-[#1a1a1a] border-b border-gray-700/60">
+            <div className="flex items-center gap-1.5">
+              {/* macOS-style traffic lights */}
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500/70" />
+              <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/70" />
+              <span className="w-2.5 h-2.5 rounded-full bg-green-500/70" />
+            </div>
+            <span className="text-[10px] text-gray-500 font-mono truncate max-w-[60%]" title={String(call.input.command ?? '')}>
+              {String(call.input.command ?? 'shell').slice(0, 60)}
+            </span>
+            <CopyButton text={call.liveOutput ?? call.output ?? ''} />
+          </div>
+
+          {/* Terminal body */}
           <pre
             ref={liveRef}
-            className="px-3 py-2 text-xs font-mono text-gray-700 dark:text-gray-300 whitespace-pre-wrap max-h-48 overflow-y-auto bg-gray-900/5 dark:bg-black/20"
+            className="px-3 py-2.5 text-[11px] font-mono leading-relaxed whitespace-pre-wrap max-h-56 overflow-y-auto bg-[#1e1e1e] text-gray-200 scrollbar-thin"
+            style={{ scrollbarColor: '#444 #1e1e1e' }}
           >
-            {call.liveOutput}
-            <span className="inline-block w-1.5 h-3 bg-blue-400 dark:bg-blue-500 ml-0.5 animate-pulse align-middle" />
+            {/* Prompt line — PS> on Windows, $ elsewhere */}
+            <span className="text-green-400 select-none">
+              {typeof window !== 'undefined' && window.api?.platform === 'win32' ? 'PS> ' : '$ '}
+            </span>
+            <span className="text-gray-300">{String(call.input.command ?? '')}</span>
+            {'\n'}
+
+            {/* Output or waiting state */}
+            {(call.liveOutput ?? call.output) ? (
+              <>
+                {call.liveOutput ?? call.output}
+                {hasLive && (
+                  <span className="inline-block w-[7px] h-[13px] bg-gray-400 ml-0.5 animate-pulse align-middle" />
+                )}
+              </>
+            ) : hasLive ? (
+              <span className="text-gray-500 italic">waiting for output…</span>
+            ) : null}
           </pre>
         </div>
       )}
 
-      {/* Final output — collapsible after completion */}
-      {expanded && call.output && (
+      {/* ── Collapsible output for non-shell tools ── */}
+      {!isShellCmd && expanded && call.output && (
         <div className="border-t border-gray-200 dark:border-gray-700">
           <div className="flex items-center justify-between px-3 py-1 bg-gray-100 dark:bg-gray-900/50">
             <span className="text-gray-400">Output</span>
@@ -467,7 +573,7 @@ function ChangedFilesBar({ files, onOpenFile }: { files: ChangedFile[]; onOpenFi
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function MessageBubble({
-  message, settings, isLastAI, chatStreaming, onEdit, onRegenerate, onBranch, onRate, onOpenFile
+  message, settings, isLastAI, chatStreaming, onEdit, onRegenerate, onBranch, onRate, onOpenFile, onOpenSettings
 }: Props) {
   const isUser       = message.role === 'user'
   const isDark       = settings.theme === 'dark'
@@ -534,36 +640,52 @@ export default function MessageBubble({
           isUser
             ? 'bg-blue-600 text-white rounded-br-md'
             : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-bl-md shadow-sm dark:shadow-none border border-gray-100 dark:border-gray-700/50'
-        } ${message.error ? 'border border-red-400 dark:border-red-500' : ''
+        } ${message.error && !message.content.trim() && !message.toolCalls?.length ? 'border border-red-400 dark:border-red-500' : ''
         } ${!isUser && message.rating === 'up'   ? '!border-green-300 dark:!border-green-700' : ''
         } ${!isUser && message.rating === 'down' ? '!border-red-300 dark:!border-red-800'    : ''}`}>
 
-          {message.error ? (
-            <div className="rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3 py-2.5 flex gap-2.5 items-start">
-              {/* Icon */}
-              <div className="flex-shrink-0 mt-0.5">
-                <svg className="w-4 h-4 text-red-500 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                </svg>
+          {/* ── Error card — shown alone when nothing else arrived, or as footer below content ── */}
+          {/* Defined as a local render helper to avoid duplication */}
+          {message.error && !message.content.trim() && !message.toolCalls?.length ? (() => {
+            // Nothing was produced — show error card as the sole bubble content
+            const isModelError = /model|not available|not found|access denied|authentication|api key|quota|billing/i.test(message.error)
+            return (
+              <div className="rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3 py-2.5 flex flex-col gap-2">
+                <div className="flex gap-2.5 items-start">
+                  <div className="flex-shrink-0 mt-0.5">
+                    <svg className="w-4 h-4 text-red-500 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-red-600 dark:text-red-400 mb-0.5">Error</p>
+                    <p className="text-xs text-red-700 dark:text-red-300 break-words leading-relaxed">{message.error}</p>
+                  </div>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(message.error ?? '')}
+                    className="flex-shrink-0 p-1 rounded text-red-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                    title="Copy error"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                  </button>
+                </div>
+                {isModelError && onOpenSettings && (
+                  <button
+                    onClick={onOpenSettings}
+                    className="self-start flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-800/60 border border-red-200 dark:border-red-700 transition-colors"
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Open Settings to change model
+                  </button>
+                )}
               </div>
-              {/* Text */}
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-red-600 dark:text-red-400 mb-0.5">Error</p>
-                <p className="text-xs text-red-700 dark:text-red-300 break-words leading-relaxed">{message.error}</p>
-              </div>
-              {/* Copy button */}
-              <button
-                onClick={() => navigator.clipboard.writeText(message.error ?? '')}
-                className="flex-shrink-0 p-1 rounded text-red-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
-                title="Copy error"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-              </button>
-            </div>
-
-          ) : isUser ? (
+            )
+          })() : isUser ? (
             // ── User message ────────────────────────────────────────────────
             isEditing ? (
               // Edit mode
@@ -763,6 +885,47 @@ export default function MessageBubble({
               )}
             </div>
           )}
+
+          {/* ── Error footer — shown below content when work was done before the error ── */}
+          {message.error && (message.content.trim() || message.toolCalls?.length) && (() => {
+            const isModelError = /model|not available|not found|access denied|authentication|api key|quota|billing/i.test(message.error)
+            return (
+              <div className="mt-3 rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3 py-2.5 flex flex-col gap-2">
+                <div className="flex gap-2.5 items-start">
+                  <div className="flex-shrink-0 mt-0.5">
+                    <svg className="w-4 h-4 text-red-500 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-red-600 dark:text-red-400 mb-0.5">Interrupted by error</p>
+                    <p className="text-xs text-red-700 dark:text-red-300 break-words leading-relaxed">{message.error}</p>
+                  </div>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(message.error ?? '')}
+                    className="flex-shrink-0 p-1 rounded text-red-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                    title="Copy error"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                  </button>
+                </div>
+                {isModelError && onOpenSettings && (
+                  <button
+                    onClick={onOpenSettings}
+                    className="self-start flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-800/60 border border-red-200 dark:border-red-700 transition-colors"
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Open Settings to change model
+                  </button>
+                )}
+              </div>
+            )
+          })()}
         </div>
 
         {/* ── Session change summary + Undo ── */}

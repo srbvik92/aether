@@ -1,5 +1,5 @@
 import {
-  useState, useRef, useEffect, useLayoutEffect, useCallback,
+  useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo,
   forwardRef, useImperativeHandle,
   KeyboardEvent, DragEvent
 } from 'react'
@@ -7,7 +7,7 @@ import React from 'react'
 import ReactDOM from 'react-dom'
 import { AppSettings, Conversation, ChatMessage, ConversationMode, ImageAttachment, ImageMimeType, PROVIDER_MODELS, PROVIDER_BASE_URLS, Provider, ProjectConfig, supportsReasoningDepth } from '../../../shared/types'
 import { PROMPT_TEMPLATES, findMatchingTemplate } from '../utils/promptTemplates'
-import MessageBubble from './MessageBubble'
+import MessageBubble, { toolIcon, toolLabel } from './MessageBubble'
 import FileMentionDropdown from './FileMentionDropdown'
 import MemoryPanel from './MemoryPanel'
 import ProjectSummaryPanel from './ProjectSummaryPanel'
@@ -67,6 +67,11 @@ interface Props {
   onSettingsUpdate?:     (settings: AppSettings) => void
   onNew?:                () => void
   onOpenSearch?:         () => void
+  onOpenSettings?:       () => void
+  /** Pre-set workspace for a brand-new chat (used by "New chat in folder X" in sidebar) */
+  initialWorkspacePath?: string
+  /** Called once ChatWindow has consumed initialWorkspacePath so parent can clear it */
+  onWorkspacePathConsumed?: () => void
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -201,19 +206,21 @@ function buildText(title: string, messages: { role: string; content: string }[])
 
 // ── Model picker (cross-provider) ────────────────────────────────────────────
 const PROVIDER_ICONS: Record<string, string> = {
-  anthropic: '◆',
-  openai:    '⬡',
-  gemini:    '✦',
-  nvidia:    '⬥',
-  custom:    '⚙',
+  anthropic:  '◆',
+  openai:     '⬡',
+  gemini:     '✦',
+  nvidia:     '⬥',
+  openrouter: '⇄',
+  custom:     '⚙',
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: 'Anthropic',
-  openai:    'OpenAI',
-  gemini:    'Google Gemini',
-  nvidia:    'NVIDIA NIM',
-  custom:    'Custom / Local',
+  anthropic:  'Anthropic',
+  openai:     'OpenAI',
+  gemini:     'Google Gemini',
+  nvidia:     'NVIDIA NIM',
+  openrouter: 'OpenRouter',
+  custom:     'Custom / Local',
 }
 
 function modelShortName(m: string, provider: string): string {
@@ -249,6 +256,29 @@ function ModelPicker({
   const portalRef  = useRef<HTMLDivElement>(null)
   const searchRef  = useRef<HTMLInputElement>(null)
 
+  // OpenRouter dynamic model list
+  const [orModels, setOrModels]   = useState<Array<{ id: string; name: string; isFree: boolean; contextLength: number }>>([])
+  const [orLoading, setOrLoading] = useState(false)
+  const orFetchedRef              = useRef(false)   // ref avoids stale-closure issues
+
+  const fetchOrModels = useCallback(async (apiKey?: string) => {
+    if (orFetchedRef.current || !isElectron) return
+    orFetchedRef.current = true   // mark immediately to prevent double-fetch
+    setOrLoading(true)
+    try {
+      const result = await window.api.getOpenRouterModels(apiKey)
+      if (result.ok && result.models.length > 0) {
+        setOrModels(result.models)
+      } else {
+        orFetchedRef.current = false  // allow retry if it failed
+      }
+    } catch {
+      orFetchedRef.current = false    // allow retry on error
+    } finally {
+      setOrLoading(false)
+    }
+  }, [])
+
   // Build the full provider+model catalogue
   const builtInProviders: Provider[] = ['anthropic', 'openai', 'gemini', 'nvidia']
   const customProviders = settings.customProviders ?? []
@@ -257,6 +287,8 @@ function ModelPicker({
   useEffect(() => {
     if (!open) { setSearch(''); setDropdownPos(null); return }
     setExpanded({ [settings.provider]: true })
+    // Kick off OpenRouter model fetch the first time the dropdown is opened
+    fetchOrModels(settings.provider === 'openrouter' ? settings.apiKey : undefined)
     setTimeout(() => searchRef.current?.focus(), 50)
     // Compute fixed position from the trigger button
     if (triggerRef.current) {
@@ -428,6 +460,73 @@ function ModelPicker({
                 </div>
               )
             })}
+
+            {/* ── OpenRouter ── */}
+            {(() => {
+              const visibleOr = orModels.filter(m =>
+                !q || m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
+              )
+              if (q && visibleOr.length === 0 && !orLoading) return null
+              const isOpen = isSearching || expanded['openrouter']
+              return (
+                <div className="border-b border-gray-100 dark:border-gray-800 last:border-0">
+                  <SectionHeader
+                    provider="openrouter"
+                    label="OpenRouter"
+                    count={orModels.length}
+                  />
+                  {isOpen && (
+                    <div className="pb-1">
+                      {orLoading && (
+                        <p className="text-[11px] text-gray-400 pl-7 pb-2 animate-pulse">Loading models…</p>
+                      )}
+                      {!orLoading && orModels.length === 0 && (
+                        <div className="pl-7 pr-3 pb-2">
+                          <p className="text-[11px] text-gray-400 mb-1">No models loaded yet.</p>
+                          <button
+                            onClick={() => fetchOrModels(settings.provider === 'openrouter' ? settings.apiKey : undefined)}
+                            className="text-[11px] text-blue-500 hover:text-blue-600 dark:hover:text-blue-400"
+                          >
+                            Fetch models
+                          </button>
+                        </div>
+                      )}
+                      {(q ? visibleOr : orModels).map(m => {
+                        const isActive = m.id === settings.model && settings.provider === 'openrouter'
+                        return (
+                          <button
+                            key={m.id}
+                            onClick={() => { onApply(m.id, 'openrouter'); setOpen(false) }}
+                            className={`w-full flex items-center gap-2 pl-7 pr-3 py-1.5 text-left transition-colors
+                              hover:bg-gray-50 dark:hover:bg-gray-800/60
+                              ${isActive ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <p className={`text-xs font-medium truncate ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-gray-800 dark:text-gray-200'}`}>
+                                  {m.name}
+                                </p>
+                                {m.isFree && (
+                                  <span className="flex-shrink-0 text-[9px] font-semibold px-1 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-700">
+                                    FREE
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-gray-400 dark:text-gray-500 font-mono truncate">{m.id}</p>
+                            </div>
+                            {isActive && (
+                              <svg className="w-3 h-3 text-blue-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                              </svg>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
 
             {/* ── Custom providers ── */}
             {customProviders.length > 0 && (
@@ -740,17 +839,19 @@ function ExportMenu({
 const PAGE_SIZE = 80
 
 interface MessageListProps {
-  messages:       ChatMessage[]
-  settings:       AppSettings
-  isStreaming:    boolean
-  messagesEndRef: React.RefObject<HTMLDivElement>
-  editMessage:    (id: string, content: string) => void
-  handleBranch:   (messageId: string) => void
-  rateMessage:    (id: string, rating: 'up' | 'down') => void
-  setEditorFile:  (path: string) => void
+  messages:         ChatMessage[]
+  settings:         AppSettings
+  isStreaming:      boolean
+  messagesEndRef:   React.RefObject<HTMLDivElement>
+  editMessage:      (id: string, content: string) => void
+  handleBranch:     (messageId: string) => void
+  rateMessage:      (id: string, rating: 'up' | 'down') => void
+  setEditorFile:    (path: string) => void
+  onOpenSettings?:  () => void
+  activeWorkspace?: string
 }
 
-function MessageList({ messages, settings, isStreaming, messagesEndRef, editMessage, handleBranch, rateMessage, setEditorFile }: MessageListProps) {
+function MessageList({ messages, settings, isStreaming, messagesEndRef, editMessage, handleBranch, rateMessage, setEditorFile, onOpenSettings, activeWorkspace }: MessageListProps) {
   const [visibleStart, setVisibleStart] = useState(() => Math.max(0, messages.length - PAGE_SIZE))
 
   useEffect(() => {
@@ -793,7 +894,8 @@ function MessageList({ messages, settings, isStreaming, messagesEndRef, editMess
             }}
             onBranch={handleBranch}
             onRate={rateMessage}
-            onOpenFile={settings.workspacePath ? (path) => setEditorFile(path) : undefined}
+            onOpenFile={activeWorkspace ? (path) => setEditorFile(path) : undefined}
+            onOpenSettings={onOpenSettings}
           />
         )
       })}
@@ -804,7 +906,8 @@ function MessageList({ messages, settings, isStreaming, messagesEndRef, editMess
 
 // ── Main component ────────────────────────────────────────────────────────────
 const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
-  { conversation, settings, onConversationUpdate, onSettingsUpdate, onNew, onOpenSearch }, ref
+  { conversation, settings, onConversationUpdate, onSettingsUpdate, onNew, onOpenSearch, onOpenSettings,
+    initialWorkspacePath, onWorkspacePathConsumed }, ref
 ) {
   const [input,           setInput]           = useState(() => {
     try { return localStorage.getItem(`draft-${conversation?.id ?? 'new'}`) ?? '' } catch { return '' }
@@ -845,6 +948,50 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   const [mode, setMode] = useState<ConversationMode>(conversation?.mode ?? 'code')
   const [activityOpen, setActivityOpen] = useState(false)
 
+  // ── Per-conversation workspace folder ────────────────────────────────────
+  const safeWorkspace = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v : undefined
+
+  const [convWorkspace, setConvWorkspace] = useState<string | undefined>(
+    safeWorkspace(conversation?.workspacePath) ?? safeWorkspace(initialWorkspacePath)
+  )
+
+  // Consume initialWorkspacePath once on mount for new chats
+  useEffect(() => {
+    if (!conversation && initialWorkspacePath) {
+      setConvWorkspace(safeWorkspace(initialWorkspacePath))
+      onWorkspacePathConsumed?.()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Sync workspace when switching conversations
+  useEffect(() => {
+    setConvWorkspace(safeWorkspace(conversation?.workspacePath))
+  }, [conversation?.id])
+
+  const handlePickFolder = useCallback(async () => {
+    if (!isElectron) return
+    const result = await window.api.pickFolder()
+    const picked = result?.path ?? null
+    if (!picked) return
+    setConvWorkspace(picked)
+    if (conversation) {
+      const updated = { ...conversation, workspacePath: picked }
+      window.api.saveConversation(updated)
+      onConversationUpdate(updated)
+    }
+  }, [conversation, onConversationUpdate])
+
+  const handleClearFolder = useCallback(() => {
+    setConvWorkspace(undefined)
+    if (conversation) {
+      const updated = { ...conversation, workspacePath: undefined }
+      window.api.saveConversation(updated)
+      onConversationUpdate(updated)
+    }
+  }, [conversation, onConversationUpdate])
+
   const handleModeChange = useCallback((newMode: ConversationMode) => {
     setMode(newMode)
     if (conversation) {
@@ -864,7 +1011,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     abortStream, rateMessage, effectiveSettings,
     autoContinueCount, agentPaused, pauseAgent, resumeAgent, maxAutoContiues
   } = useChat({
-    conversation, settings, onConversationUpdate, mode
+    conversation, settings, onConversationUpdate, mode, workspacePath: convWorkspace
   })
 
   // Expose focusInput to parent (keyboard shortcut Ctrl+/)
@@ -925,36 +1072,39 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   }, [fileError])
 
   // ── @-mention: load workspace file list (once, lazily) ───────────────────
+  // Use per-conversation workspace if set, else fall back to global settings
+  const activeWorkspace = convWorkspace || settings.workspacePath
+
   const loadMentionFiles = useCallback(async () => {
-    if (!isElectron || !settings.workspacePath || mentionFiles.length > 0) return
+    if (!isElectron || !activeWorkspace || mentionFiles.length > 0) return
     try {
-      const files = await window.api.listWorkspaceFiles(settings.workspacePath)
+      const files = await window.api.listWorkspaceFiles(activeWorkspace)
       setMentionFiles(files)
     } catch { /* silently ignore — mentions just won't work */ }
-  }, [settings.workspacePath, mentionFiles.length])
+  }, [activeWorkspace, mentionFiles.length])
 
   // Refresh mention file list when workspace changes
   useEffect(() => {
     setMentionFiles([])
-  }, [settings.workspacePath])
+  }, [activeWorkspace])
 
   // Load .chatui project config when workspace changes
   useEffect(() => {
-    if (!isElectron || !settings.workspacePath) { setProjectConfig(null); return }
-    window.api.getProjectConfig(settings.workspacePath).then(cfg => setProjectConfig(cfg))
-  }, [settings.workspacePath])
+    if (!isElectron || !activeWorkspace) { setProjectConfig(null); return }
+    window.api.getProjectConfig(activeWorkspace).then(cfg => setProjectConfig(cfg))
+  }, [activeWorkspace])
 
   // Load pins count when workspace changes
   useEffect(() => {
-    if (!isElectron || !settings.workspacePath) { setPinsCount(0); return }
-    window.api.readPins(settings.workspacePath).then(({ pins }) => setPinsCount(pins.length))
-  }, [settings.workspacePath])
+    if (!isElectron || !activeWorkspace) { setPinsCount(0); return }
+    window.api.readPins(activeWorkspace).then(({ pins }) => setPinsCount(pins.length))
+  }, [activeWorkspace])
 
   // Load plugin count when workspace changes
   useEffect(() => {
-    if (!isElectron || !settings.workspacePath) { setPluginsCount(0); return }
-    window.api.listPlugins(settings.workspacePath).then(p => setPluginsCount(p.length)).catch(() => setPluginsCount(0))
-  }, [settings.workspacePath])
+    if (!isElectron || !activeWorkspace) { setPluginsCount(0); return }
+    window.api.listPlugins(activeWorkspace).then(p => setPluginsCount(p.length)).catch(() => setPluginsCount(0))
+  }, [activeWorkspace])
 
   // ── Scheduled task fire ────────────────────────────────────────────────────
   useEffect(() => {
@@ -1364,6 +1514,41 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   const convTitle      = conversation?.title ?? 'New Chat'
   const totalChipCount = attachedFiles.length + mentionChips.length + attachedImages.length
 
+  // ── Live activity: find the currently-running tool call ──────────────────
+  const activeToolCall = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role === 'assistant' && msg.toolCalls?.length) {
+        const running = msg.toolCalls.find(tc => tc.status === 'running')
+        if (running) return running
+      }
+    }
+    return null
+  }, [messages])
+
+  // ── Elapsed timer — ticks every second while streaming ───────────────────
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const streamStartRef = useRef<number | null>(null)
+  const timerRef       = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    if (isStreaming) {
+      streamStartRef.current = Date.now()
+      setElapsedSeconds(0)
+      timerRef.current = setInterval(() => {
+        setElapsedSeconds(Math.floor((Date.now() - (streamStartRef.current ?? Date.now())) / 1000))
+      }, 1000)
+    } else {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+    }
+    return () => { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null } }
+  }, [isStreaming])
+
+  // Format elapsed seconds as m:ss once ≥ 60s, else just "Xs"
+  const elapsedLabel = elapsedSeconds >= 60
+    ? `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, '0')}`
+    : `${elapsedSeconds}s`
+
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div
@@ -1534,6 +1719,8 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
               handleBranch={handleBranch}
               rateMessage={rateMessage}
               setEditorFile={setEditorFile}
+              onOpenSettings={onOpenSettings}
+              activeWorkspace={activeWorkspace}
             />
           )}
         </div>
@@ -1648,9 +1835,49 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
         </div>
       )}
 
-      {/* Floating stop button — shown prominently while streaming */}
+      {/* Live activity status pill + stop button — shown while streaming */}
       {isStreaming && (
-        <div className="flex justify-center pb-2 flex-shrink-0">
+        <div className="flex flex-col items-center gap-1.5 pb-2 flex-shrink-0">
+          {/* Activity pill */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm text-xs text-gray-600 dark:text-gray-300 max-w-md">
+            {activeToolCall ? (
+              <>
+                {/* Spinning ring */}
+                <span className="flex-shrink-0 w-3 h-3 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
+                <span className="text-sm leading-none">{toolIcon(activeToolCall.name)}</span>
+                <span className="font-medium text-blue-600 dark:text-blue-400 truncate">
+                  {toolLabel(activeToolCall.name)}
+                </span>
+                {/* Show path/arg if available */}
+                {(() => {
+                  const inp = activeToolCall.input as Record<string, unknown>
+                  const arg = (inp.path ?? inp.command ?? inp.query ?? inp.url ?? inp.pattern)
+                  if (typeof arg !== 'string' || !arg) return null
+                  const short = arg.length > 35
+                    ? '…' + arg.replace(/\\/g, '/').split('/').slice(-2).join('/')
+                    : arg
+                  return <span className="text-gray-400 dark:text-gray-500 truncate font-mono">· {short}</span>
+                })()}
+              </>
+            ) : (
+              <>
+                {/* Pulsing dots for "thinking" */}
+                <span className="flex gap-0.5 items-center flex-shrink-0">
+                  <span className="w-1 h-1 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1 h-1 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1 h-1 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
+                <span className="font-medium text-blue-600 dark:text-blue-400">Thinking…</span>
+              </>
+            )}
+            {/* Elapsed timer — separator + time */}
+            <span className="flex-shrink-0 text-gray-300 dark:text-gray-600 select-none">·</span>
+            <span className="flex-shrink-0 tabular-nums text-gray-400 dark:text-gray-500 font-mono">
+              {elapsedLabel}
+            </span>
+          </div>
+
+          {/* Stop button */}
           <button
             onClick={abortStream}
             className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 shadow-md hover:shadow-lg text-sm text-gray-700 dark:text-gray-200 hover:bg-red-50 dark:hover:bg-red-900/30 hover:border-red-300 dark:hover:border-red-700 hover:text-red-600 dark:hover:text-red-400 transition-all"
@@ -1683,7 +1910,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
       <div className="border-t border-gray-200 dark:border-gray-800 p-4 flex-shrink-0 bg-white dark:bg-gray-950 relative">
 
         {/* @-mention dropdown — rendered above input area */}
-        {mentionQuery !== null && settings.workspacePath && (
+        {mentionQuery !== null && activeWorkspace && (
           <FileMentionDropdown
             query={mentionQuery}
             files={mentionFiles}
@@ -1723,30 +1950,6 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
           </div>
         )}
 
-        {/* Quick action chips — shown when input is empty and we have messages */}
-        {quickActions.length > 0 && input.trim() === '' && totalChipCount === 0 && !isStreaming && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {quickActions.map((action) => (
-              <button
-                key={action.label}
-                onClick={() => {
-                  setInput(action.prompt)
-                  setTimeout(() => textareaRef.current?.focus(), 0)
-                }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
-                           bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400
-                           border border-gray-200 dark:border-gray-700
-                           hover:bg-blue-50 dark:hover:bg-blue-900/30
-                           hover:text-blue-600 dark:hover:text-blue-400
-                           hover:border-blue-300 dark:hover:border-blue-700
-                           transition-colors"
-              >
-                <span className="text-sm leading-none">{action.icon}</span>
-                {action.label}
-              </button>
-            ))}
-          </div>
-        )}
 
         {/* Chips: images + @-mentions + attached files */}
         {totalChipCount > 0 && (
@@ -1820,9 +2023,9 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             placeholder={
-              noApiKey               ? 'Configure your API key in Settings first…' :
-              totalChipCount > 0     ? 'Add a message… (optional)  ·  Paste more images or type @' :
-              settings.workspacePath ? 'Message AI…  ·  Paste or drag images  ·  Type @ to mention a file  ·  Enter ↵ to send' :
+              noApiKey           ? 'Configure your API key in Settings first…' :
+              totalChipCount > 0 ? 'Add a message… (optional)  ·  Paste more images or type @' :
+              activeWorkspace    ? 'Message AI…  ·  Paste or drag images  ·  Type @ to mention a file  ·  Enter ↵ to send' :
               'Message AI…  ·  Paste or drag images  ·  Enter ↵ to send, Shift+Enter for newline'
             }
             disabled={noApiKey}
@@ -1849,12 +2052,54 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
           )}
         </div>
 
-        {/* Bottom bar */}
-        <div className="flex items-center justify-between mt-2 px-1">
+        {/* Bottom bar — three columns: left | center | right */}
+        <div className="flex items-center mt-2 px-1 gap-2">
 
-          {/* Left: approve-edits toggle (only when workspace is set) */}
-          <div className="flex items-center gap-1">
-            {onSettingsUpdate && settings.workspacePath ? (
+          {/* Left: folder picker + approve-edits toggle */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+
+            {/* Folder chip — shows active folder or "Add folder" button */}
+            {isElectron && (
+              convWorkspace ? (
+                <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300 max-w-[200px]">
+                  {/* folder icon */}
+                  <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                  </svg>
+                  <button
+                    onClick={handlePickFolder}
+                    title={`Workspace: ${convWorkspace}\nClick to change folder`}
+                    className="truncate hover:text-violet-900 dark:hover:text-violet-100 transition-colors"
+                  >
+                    {String(convWorkspace).split(/[\\/]/).pop()}
+                  </button>
+                  <button
+                    onClick={handleClearFolder}
+                    title="Remove folder from this chat"
+                    className="flex-shrink-0 ml-0.5 text-violet-400 hover:text-violet-700 dark:hover:text-violet-200 transition-colors"
+                  >
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handlePickFolder}
+                  title="Add a folder — AI tools will be restricted to this folder"
+                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                  className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium text-gray-400 dark:text-gray-600 border border-dashed border-gray-300 dark:border-gray-700 hover:text-violet-600 dark:hover:text-violet-400 hover:border-violet-400 dark:hover:border-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-all"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                  </svg>
+                  Add folder
+                </button>
+              )
+            )}
+
+            {/* Approve-edits toggle — only when a workspace folder is active */}
+            {onSettingsUpdate && activeWorkspace && (
               <button
                 onClick={() => onSettingsUpdate({ ...settings, requireEditApproval: settings.requireEditApproval === false ? true : false })}
                 title={settings.requireEditApproval !== false
@@ -1867,17 +2112,64 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
                     : 'text-gray-400 dark:text-gray-600 bg-transparent border-transparent hover:bg-gray-100 dark:hover:bg-gray-800 hover:border-gray-200 dark:hover:border-gray-700'
                   }`}
               >
-                {/* shield icon */}
                 <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                 </svg>
                 <span>{settings.requireEditApproval !== false ? 'Approve edits' : 'Auto-write'}</span>
               </button>
-            ) : <div />}
+            )}
+
+            {/* Approve-commands toggle — only when a workspace folder is active */}
+            {onSettingsUpdate && activeWorkspace && (
+              <button
+                onClick={() => onSettingsUpdate({ ...settings, autoApproveCommands: !settings.autoApproveCommands })}
+                title={settings.autoApproveCommands
+                  ? 'Commands: auto-run ON — safe commands execute without asking. Click to require approval.'
+                  : 'Commands: approval ON — AI must ask before running any command. Click to auto-run.'}
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-all border
+                  ${settings.autoApproveCommands
+                    ? 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800 hover:bg-orange-100 dark:hover:bg-orange-900/40'
+                    : 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/40'
+                  }`}
+              >
+                <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2"/><polyline points="9 9 9 15"/><polyline points="9 12 15 12"/>
+                </svg>
+                <span>{settings.autoApproveCommands ? 'Auto-run cmds' : 'Approve cmds'}</span>
+              </button>
+            )}
+          </div>
+
+          {/* Center: quick action buttons — only when there are messages and input is empty */}
+          <div className="flex-1 flex items-center justify-center gap-1 min-w-0">
+            {quickActions.length > 0 && input.trim() === '' && totalChipCount === 0 && !isStreaming && (
+              quickActions.map((action) => (
+                <button
+                  key={action.label}
+                  onClick={() => {
+                    setInput(action.prompt)
+                    setTimeout(() => textareaRef.current?.focus(), 0)
+                  }}
+                  title={action.label}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium
+                             text-gray-400 dark:text-gray-600
+                             border border-transparent
+                             hover:text-blue-600 dark:hover:text-blue-400
+                             hover:bg-blue-50 dark:hover:bg-blue-900/20
+                             hover:border-blue-200 dark:hover:border-blue-800
+                             transition-colors group"
+                >
+                  <span className="text-sm leading-none flex-shrink-0">{action.icon}</span>
+                  {/* Label hidden on narrow widths */}
+                  <span className="hidden sm:inline truncate">{action.label}</span>
+                </button>
+              ))
+            )}
           </div>
 
           {/* Right: model picker + reasoning depth + token hint */}
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 flex-shrink-0">
             {/* Token / attach hint */}
             <p className="text-xs text-gray-400 dark:text-gray-600 mr-1">
               {input.length > 0 || attachedImages.length > 0
@@ -1912,7 +2204,8 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
                 settings={effectiveSettings}
                 openUp
                 onApply={(model, provider) => {
-                  onSettingsUpdate({ ...settings, model, provider })
+                  const baseUrl = PROVIDER_BASE_URLS[provider] ?? settings.baseUrl
+                  onSettingsUpdate({ ...settings, model, provider, baseUrl })
                   if (conversation && isElectron) {
                     const updated = { ...conversation, model, provider }
                     window.api.saveConversation(updated)

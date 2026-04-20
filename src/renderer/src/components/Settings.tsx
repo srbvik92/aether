@@ -7,7 +7,8 @@ import {
   PROVIDER_BASE_URLS,
   VERTEX_LOCATIONS,
   SemanticIndexInfo,
-  SemanticIndexStatusPayload
+  SemanticIndexStatusPayload,
+  DEFAULT_SETTINGS
 } from '../../../shared/types'
 import { useSemanticIndex } from '../hooks/useSemanticIndex'
 import type { SemanticSearchResult } from '../../../shared/types'
@@ -328,6 +329,36 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
   const [form, setForm] = useState<AppSettings>({ ...settings })
   const originalSettings = useRef<AppSettings>({ ...settings })
   const [hasChanges, setHasChanges] = useState(false)
+
+  // ── OpenRouter dynamic model list ────────────────────────────────────────
+  const [orModels, setOrModels]     = useState<Array<{ id: string; name: string; isFree: boolean }>>([])
+  const [orLoading, setOrLoading]   = useState(false)
+  const orFetchedRef                = useRef(false)
+
+  const fetchOrModels = useCallback(async (apiKey?: string) => {
+    if (orFetchedRef.current) return
+    orFetchedRef.current = true
+    setOrLoading(true)
+    try {
+      const result = await window.api.getOpenRouterModels(apiKey)
+      if (result.ok && result.models.length > 0) {
+        setOrModels(result.models)
+      } else {
+        orFetchedRef.current = false  // allow retry
+      }
+    } catch {
+      orFetchedRef.current = false
+    } finally {
+      setOrLoading(false)
+    }
+  }, [])
+
+  // Auto-fetch when provider is openrouter
+  useEffect(() => {
+    if (form.provider === 'openrouter') {
+      fetchOrModels(form.apiKey || undefined)
+    }
+  }, [form.provider, fetchOrModels])
   const [importExportMsg, setImportExportMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [showKey, setShowKey] = useState(false)
   const [showSA, setShowSA] = useState(false)
@@ -458,10 +489,11 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
     setHasChanges(changed)
   }, [form])
 
-  const isGemini  = form.provider === 'gemini'
-  const isCustom  = form.provider === 'custom'
-  const isNvidia  = form.provider === 'nvidia'
-  const needsApiKey = !isGemini
+  const isGemini     = form.provider === 'gemini'
+  const isCustom     = form.provider === 'custom'
+  const isNvidia     = form.provider === 'nvidia'
+  const isOpenRouter = form.provider === 'openrouter'
+  const needsApiKey  = !isGemini
 
   // Max output tokens per model (the slider ceiling)
   const MAX_OUTPUT_TOKENS: Record<string, number> = {
@@ -487,11 +519,12 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
   const sliderStep = maxOutputCeiling > 32_768 ? 1024 : 256
 
   const providerOptions: { value: Provider; label: string; badge: string }[] = [
-    { value: 'anthropic', label: 'Anthropic',       badge: 'Claude'        },
-    { value: 'openai',    label: 'OpenAI',           badge: 'GPT'           },
-    { value: 'gemini',    label: 'Google Gemini',    badge: 'Vertex AI'     },
-    { value: 'nvidia',    label: 'NVIDIA NIM',       badge: 'OpenAI-compat' },
-    { value: 'custom',    label: 'Custom / Local',   badge: 'OpenAI-compat' }
+    { value: 'anthropic',  label: 'Anthropic',       badge: 'Claude'        },
+    { value: 'openai',     label: 'OpenAI',           badge: 'GPT'           },
+    { value: 'gemini',     label: 'Google Gemini',    badge: 'Vertex AI'     },
+    { value: 'nvidia',     label: 'NVIDIA NIM',       badge: 'OpenAI-compat' },
+    { value: 'openrouter', label: 'OpenRouter',       badge: '300+ models'   },
+    { value: 'custom',     label: 'Custom / Local',   badge: 'OpenAI-compat' }
   ]
 
   // ── shared input / select className helpers ──────────────────────────────
@@ -694,9 +727,10 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
                 </button>
               </div>
               <p className={hintCls}>
-                {form.provider === 'anthropic' && <>Get your key at <span className="text-blue-500">console.anthropic.com</span></>}
-                {form.provider === 'openai'    && <>Get your key at <span className="text-blue-500">platform.openai.com/api-keys</span></>}
-                {form.provider === 'nvidia'    && <>Get your free API key at <span className="text-blue-500">build.nvidia.com</span> — 1000 free credits/month</>}
+                {form.provider === 'anthropic'  && <>Get your key at <span className="text-blue-500">console.anthropic.com</span></>}
+                {form.provider === 'openai'     && <>Get your key at <span className="text-blue-500">platform.openai.com/api-keys</span></>}
+                {form.provider === 'nvidia'     && <>Get your free API key at <span className="text-blue-500">build.nvidia.com</span> — 1000 free credits/month</>}
+                {form.provider === 'openrouter' && <>Get your free key at <span className="text-blue-500">openrouter.ai/keys</span> — access 300+ models, many free</>}
               </p>
             </section>
           )}
@@ -864,6 +898,61 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
                 />
                 <p className={hintCls}>Browse all models at <span className="text-blue-500">build.nvidia.com/explore</span></p>
               </>
+            ) : isOpenRouter ? (
+              <>
+                {orLoading && (
+                  <p className={hintCls + ' animate-pulse'}>Loading models from OpenRouter…</p>
+                )}
+                {!orLoading && orModels.length === 0 && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={form.model}
+                      onChange={(e) => setForm({ ...form, model: e.target.value })}
+                      placeholder="e.g. google/gemma-3-27b-it:free"
+                      className={inputCls}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => { orFetchedRef.current = false; fetchOrModels(form.apiKey || undefined) }}
+                      className="flex-shrink-0 px-3 py-2 text-xs rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+                    >
+                      Load
+                    </button>
+                  </div>
+                )}
+                {orModels.length > 0 && (
+                  <>
+                    <select
+                      value={orModels.find(m => m.id === form.model) ? form.model : '__custom__'}
+                      onChange={(e) => { if (e.target.value !== '__custom__') setForm({ ...form, model: e.target.value }) }}
+                      className={selectCls}
+                    >
+                      {!orModels.find(m => m.id === form.model) && (
+                        <option value="__custom__">{form.model || '— select a model —'}</option>
+                      )}
+                      <optgroup label="── Free models ─────────────────────">
+                        {orModels.filter(m => m.isFree).map(m => (
+                          <option key={m.id} value={m.id}>{m.name} ({m.id})</option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="── Paid models ─────────────────────">
+                        {orModels.filter(m => !m.isFree).map(m => (
+                          <option key={m.id} value={m.id}>{m.name} ({m.id})</option>
+                        ))}
+                      </optgroup>
+                    </select>
+                    <input
+                      type="text"
+                      value={form.model}
+                      onChange={(e) => setForm({ ...form, model: e.target.value })}
+                      placeholder="or type any model ID"
+                      className={`${inputCls} mt-2 text-xs`}
+                    />
+                  </>
+                )}
+                <p className={hintCls}>Browse all models at <span className="text-blue-500">openrouter.ai/models</span></p>
+              </>
             ) : (
               <select
                 value={form.model}
@@ -923,27 +1012,66 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
 
           {/* ── System Prompt ─────────────────────────────────────────── */}
           <section className="mb-6">
-            <div className="flex items-center justify-between mb-1.5">
-              <label className={`${labelCls} mb-0`}>System Prompt</label>
-              <TemplateDropdown
-                currentPrompt={form.systemPrompt}
-                onSelect={(prompt) => setForm({ ...form, systemPrompt: prompt })}
-              />
+            <label className={labelCls}>System Prompt</label>
+            <div className="flex gap-2 mb-3">
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, systemPrompt: DEFAULT_SETTINGS.systemPrompt })}
+                className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
+                  form.systemPrompt === DEFAULT_SETTINGS.systemPrompt
+                    ? 'bg-blue-600 border-blue-600 text-white'
+                    : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
+                }`}
+              >
+                Default
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (form.systemPrompt === DEFAULT_SETTINGS.systemPrompt) {
+                    setForm({ ...form, systemPrompt: '' })
+                  }
+                }}
+                className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
+                  form.systemPrompt !== DEFAULT_SETTINGS.systemPrompt
+                    ? 'bg-blue-600 border-blue-600 text-white'
+                    : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
+                }`}
+              >
+                Custom
+              </button>
             </div>
-            <textarea
-              rows={4}
-              value={form.systemPrompt}
-              onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
-              className={`${inputCls} resize-none`}
-            />
-            {(() => {
-              const match = findMatchingTemplate(form.systemPrompt)
-              return match ? (
-                <p className="text-[11px] text-blue-500 dark:text-blue-400 mt-1">
-                  {match.icon} Using template: <span className="font-medium">{match.name}</span>
-                </p>
-              ) : null
-            })()}
+
+            {form.systemPrompt === DEFAULT_SETTINGS.systemPrompt ? (
+              <p className="text-xs text-gray-500 dark:text-gray-400 px-3 py-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700">
+                Using the built-in Aether system prompt. Switch to Custom to write your own.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Your custom prompt</span>
+                  <TemplateDropdown
+                    currentPrompt={form.systemPrompt}
+                    onSelect={(prompt) => setForm({ ...form, systemPrompt: prompt })}
+                  />
+                </div>
+                <textarea
+                  rows={6}
+                  placeholder="Enter your system prompt…"
+                  value={form.systemPrompt}
+                  onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
+                  className={`${inputCls} resize-none`}
+                />
+                {(() => {
+                  const match = findMatchingTemplate(form.systemPrompt)
+                  return match ? (
+                    <p className="text-[11px] text-blue-500 dark:text-blue-400 mt-1">
+                      {match.icon} Using template: <span className="font-medium">{match.name}</span>
+                    </p>
+                  ) : null
+                })()}
+              </>
+            )}
           </section>
 
           {/* ── Appearance ───────────────────────────────────────── */}
@@ -1376,17 +1504,45 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
             </div>
           </section>
 
-          {/* ── Trusted Commands ─────────────────────────────────────── */}
+          {/* ── Command Approval ─────────────────────────────────────── */}
           <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
-            <label className={labelCls}>
+            <label className={labelCls}>Command Execution</label>
+
+            {/* Auto-approve toggle */}
+            <div className="flex items-start justify-between gap-4 mb-5">
+              <div>
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Auto-approve commands</p>
+                <p className={hintCls}>
+                  When <strong>on</strong>, all safe commands run without asking.
+                  Dangerous commands (<code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">rm -rf</code>,{' '}
+                  <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">git reset --hard</code>, etc.)
+                  always require approval.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, autoApproveCommands: !f.autoApproveCommands }))}
+                className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative mt-0.5 ${form.autoApproveCommands ? 'bg-orange-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${form.autoApproveCommands ? 'translate-x-5' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            <div className="mb-4">
+              <span className={`text-xs font-medium px-2 py-0.5 rounded ${form.autoApproveCommands ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}>
+                {form.autoApproveCommands
+                  ? '⚡ Auto-run — safe commands execute immediately'
+                  : '🔒 Manual approval — every command needs your OK'}
+              </span>
+            </div>
+
+            {/* Trusted command prefixes */}
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Trusted Commands
-              <span className="ml-2 font-normal text-green-600 dark:text-green-400 text-xs">Auto-approved</span>
+              <span className="ml-2 font-normal text-green-600 dark:text-green-400 text-xs">Always auto-approved</span>
             </label>
             <p className={`${hintCls} mb-2`}>
-              Command prefixes that run without approval prompts. One per line.
-              Dangerous commands (<code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">rm -rf</code>,{' '}
-              <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded text-xs">git reset --hard</code>, etc.)
-              always require approval regardless of this list.
+              Command prefixes that always run without approval, even when auto-approve is off. One per line.
+              Dangerous commands are never auto-approved regardless.
             </p>
             <textarea
               rows={6}

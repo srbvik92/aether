@@ -34,6 +34,9 @@ import {
 } from '../shared/types'
 
 const api = {
+  // Platform info (exposed synchronously — safe, no IPC needed)
+  platform: process.platform as 'win32' | 'darwin' | 'linux',
+
   // Settings
   getSettings: (): Promise<AppSettings> =>
     ipcRenderer.invoke(IPC.GET_SETTINGS),
@@ -98,7 +101,9 @@ const api = {
     ipcRenderer.removeAllListeners(IPC.TOOL_OUTPUT_CHUNK)
     ipcRenderer.removeAllListeners(IPC.CONTEXT_COMPRESSING)
     ipcRenderer.removeAllListeners(IPC.SESSION_CHANGES)
-    ipcRenderer.removeAllListeners(IPC.CMD_APPROVAL_REQUEST)
+    // NOTE: CMD_APPROVAL_REQUEST is intentionally NOT cleared here.
+    // App.tsx registers a persistent app-level listener for the modal; removing
+    // it on every stream end would break approval after the first message.
   },
 
   // Window title bar
@@ -113,6 +118,13 @@ const api = {
   pickFolder: (): Promise<{ path: string | null }> =>
     ipcRenderer.invoke(IPC.PICK_FOLDER),
 
+  // OpenRouter — fetch available models (sorted: free first, then paid alphabetically)
+  getOpenRouterModels: (apiKey?: string): Promise<{
+    ok: boolean
+    models: Array<{ id: string; name: string; contextLength: number; isFree: boolean; promptPrice: string }>
+    error?: string
+  }> => ipcRenderer.invoke(IPC.OPENROUTER_GET_MODELS, apiKey),
+
   // Diff viewer — renderer listens for requests, sends back approval
   onDiffRequest: (callback: (payload: DiffRequestPayload) => void) => {
     ipcRenderer.on(IPC.DIFF_REQUEST, (_e, payload) => callback(payload))
@@ -126,6 +138,8 @@ const api = {
   },
   respondCmdApproval: (id: string, approved: boolean): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(IPC.CMD_APPROVAL_RESPONSE, id, approved),
+  killCommand: (callId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.KILL_COMMAND, callId),
 
   // Git status for UI
   getGitStatus: (workspacePath: string): Promise<GitStatusSummary> =>

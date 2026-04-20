@@ -100,15 +100,6 @@ export default function App() {
     }).catch(() => setLoaded(true))
   }, [])
 
-  // ── Redirect to settings if missing credentials ───────────────────────────
-  useEffect(() => {
-    if (!loaded) return
-    const missingKey = settings.provider === 'gemini'
-      ? !settings.vertexProjectId
-      : !settings.apiKey
-    if (missingKey) setView('settings')
-  }, [loaded])
-
   // ── Diff request listener ─────────────────────────────────────────────────
   // Keep acceptAllActive accessible inside the callback via a ref
   const acceptAllRef = useRef(false)
@@ -127,11 +118,17 @@ export default function App() {
   }, [])
 
   // ── Shell command approval listener ──────────────────────────────────────
+  // This is the SINGLE IPC listener for CMD_APPROVAL_REQUEST.
+  // It both shows the modal AND dispatches a DOM event so useChat.ts can
+  // flip the tool card to 'awaiting-approval' without needing its own IPC listener.
   useEffect(() => {
     if (!isElectron) return
     window.api.onCmdApproval((payload) => {
       setPendingCmd(payload)
+      // Let useChat.ts know so it can update the tool card state
+      window.dispatchEvent(new CustomEvent('cmd-approval-pending', { detail: payload }))
     })
+    // This listener lives for the full app lifetime — do NOT remove it on cleanup.
   }, [])
 
   // ── Scheduled task fire listener ──────────────────────────────────────────
@@ -189,7 +186,14 @@ export default function App() {
 
   const toggleTerminal = useCallback(() => setTerminalOpen(v => !v), [])
   const openSearch     = useCallback(() => setSearchOpen(true), [])
-  const startNewChat   = useCallback(() => { setActiveConvId(null); setView('chat') }, [])
+  // pendingNewChatWorkspace: when a "New chat in folder X" is clicked, we stash
+  // the folder here so ChatWindow picks it up on first message.
+  const [pendingNewChatWorkspace, setPendingNewChatWorkspace] = useState<string | null>(null)
+  const startNewChat = useCallback((workspacePath?: string) => {
+    setActiveConvId(null)
+    setView('chat')
+    setPendingNewChatWorkspace(workspacePath ?? null)
+  }, [])
 
   // "New chat" button inside the context-limit warning banner
   useEffect(() => {
@@ -486,6 +490,9 @@ export default function App() {
                   }}
                   onNew={startNewChat}
                   onOpenSearch={() => setSearchOpen(true)}
+                  onOpenSettings={() => setView('settings')}
+                  initialWorkspacePath={pendingNewChatWorkspace ?? undefined}
+                  onWorkspacePathConsumed={() => setPendingNewChatWorkspace(null)}
                 />
               </div>
               <Suspense fallback={null}>

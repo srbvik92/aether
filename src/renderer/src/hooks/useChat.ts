@@ -13,7 +13,8 @@ import {
   ContextCompressingPayload,
   SessionChangesPayload,
   ToolCallDisplay,
-  ImageAttachment
+  ImageAttachment,
+  CmdApprovalPayload
 } from '../../../shared/types'
 
 function genId(): string {
@@ -25,6 +26,7 @@ interface UseChatOptions {
   settings:             AppSettings
   onConversationUpdate: (conv: Conversation) => void
   mode?:                ConversationMode
+  workspacePath?:       string   // per-conversation folder (overrides conversation.workspacePath)
 }
 
 // ── Agent mode auto-continue detection ──────────────────────────────────────
@@ -57,8 +59,25 @@ function detectAgentShouldContinue(content: string): boolean {
   return false
 }
 
-export function useChat({ conversation, settings, onConversationUpdate, mode = 'code' }: UseChatOptions) {
-  const [messages,      setMessages]      = useState<ChatMessage[]>(conversation?.messages ?? [])
+/** Clean up any tool calls / messages left in a "running" state from a previous session. */
+function sanitiseLoadedMessages(msgs: ChatMessage[]): ChatMessage[] {
+  return msgs.map(m => {
+    const hasStale = m.isStreaming || m.toolCalls?.some(tc => tc.status === 'running')
+    if (!hasStale) return m
+    return {
+      ...m,
+      isStreaming: false,
+      toolCalls: m.toolCalls?.map(tc =>
+        tc.status === 'running'
+          ? { ...tc, status: 'error' as const, output: 'Interrupted — app was restarted.' }
+          : tc
+      )
+    }
+  })
+}
+
+export function useChat({ conversation, settings, onConversationUpdate, mode = 'code', workspacePath }: UseChatOptions) {
+  const [messages,      setMessages]      = useState<ChatMessage[]>(sanitiseLoadedMessages(conversation?.messages ?? []))
   const [isStreaming,   setIsStreaming]   = useState(false)
   const [isCompressing, setIsCompressing] = useState(false)
   const [activeConvId,  setActiveConvId]  = useState<string | null>(conversation?.id ?? null)
@@ -76,10 +95,14 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
   const modeRef = useRef(mode)
   modeRef.current = mode
 
-  // Reset auto-title state when switching conversations
+  // Reset state when switching conversations; sanitise any stale "running" tool calls
   useEffect(() => {
     autoTitledRef.current = false
     setCustomTitle(null)
+    setMessages(sanitiseLoadedMessages(conversation?.messages ?? []))
+    setIsStreaming(false)
+    setIsCompressing(false)
+    streamingIdRef.current = null
   }, [conversation?.id])
 
   // ── Per-conversation model lock ───────────────────────────────────────────
@@ -176,16 +199,25 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       setIsStreaming(false)
     })
 
-    // Stream error
+    // Stream error — keep whatever the AI already produced (text + tool calls),
+    // just mark it done and attach the error so it renders below the partial response.
     window.api.onStreamError((payload: StreamErrorPayload) => {
       if (payload.conversationId !== activeConvId) return
       setIsCompressing(false)
       setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? { ...m, content: '', isStreaming: false, error: payload.error }
-            : m
-        )
+        prev.map(m => {
+          if (m.id !== streamingIdRef.current) return m
+          // If there's already content or tool calls, preserve them and append the error.
+          // If nothing arrived yet (empty message), replace with error only.
+          const hasWork = m.content.trim().length > 0 || (m.toolCalls && m.toolCalls.length > 0)
+          return {
+            ...m,
+            isStreaming: false,
+            error: payload.error,
+            // Keep existing content; clear it only if nothing was produced at all
+            content: hasWork ? m.content : ''
+          }
+        })
       )
       streamingIdRef.current = null
       setIsStreaming(false)
@@ -209,6 +241,25 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
         )
       )
     })
+
+    // Command approval pending — flip the tool card to awaiting-approval state.
+    // App.tsx holds the single IPC listener and re-dispatches as a DOM event,
+    // so we listen here without competing with the modal listener.
+    const cmdApprovalHandler = (e: Event) => {
+      const payload = (e as CustomEvent<CmdApprovalPayload>).detail
+      if (!payload.callId) return
+      setMessages(prev =>
+        prev.map(m => ({
+          ...m,
+          toolCalls: m.toolCalls?.map(tc =>
+            tc.id === payload.callId
+              ? { ...tc, status: 'awaiting-approval' as const, approvalId: payload.id }
+              : tc
+          )
+        }))
+      )
+    }
+    window.addEventListener('cmd-approval-pending', cmdApprovalHandler)
 
     // Tool call result — update the matching call in the current AI message
     window.api.onToolCallResult((payload: ToolCallResultPayload) => {
@@ -282,6 +333,7 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
 
     return () => {
       window.removeEventListener('agent-continue', handleAgentContinue)
+      window.removeEventListener('cmd-approval-pending', cmdApprovalHandler)
       window.api.removeStreamListeners()
       // Clear any message that got stuck with isStreaming:true when listeners are torn down
       setMessages(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
@@ -305,7 +357,9 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       // Preserve the locked model/provider (effectiveSettings resolves it correctly)
       provider:  effectiveSettings.provider,
       model:     effectiveSettings.model,
-      mode:      modeRef.current
+      mode:      modeRef.current,
+      // Preserve per-conversation folder — prefer live prop, fall back to stored value
+      workspacePath: workspacePath ?? conversation?.workspacePath,
     }
     window.api.saveConversation(conv)
     onConversationUpdate(conv)
@@ -354,7 +408,7 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       }))
 
       try {
-        await window.api.sendMessage({ conversationId: convId, messages: history, settings: effectiveSettings, mode: modeRef.current })
+        await window.api.sendMessage({ conversationId: convId, messages: history, settings: effectiveSettings, mode: modeRef.current, workspacePath: workspacePath ?? conversation?.workspacePath })
       } catch (err) {
         // IPC invoke itself threw (e.g. main process error before stream started)
         const errorMsg = err instanceof Error ? err.message : 'Failed to send message'
@@ -414,7 +468,7 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       }))
 
       try {
-        await window.api.sendMessage({ conversationId: convId, messages: history, settings: effectiveSettings, mode: modeRef.current })
+        await window.api.sendMessage({ conversationId: convId, messages: history, settings: effectiveSettings, mode: modeRef.current, workspacePath: workspacePath ?? conversation?.workspacePath })
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : 'Failed to send message'
         setMessages(prev => prev.map(m =>
