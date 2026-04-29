@@ -83,6 +83,7 @@ jobs:
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
+        continue-on-error: true          # quota full should not fail the build
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -92,7 +93,7 @@ jobs:
             out/*.deb
             out/*.zip
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1              # release assets already live in GitHub Releases
 
   test:
     runs-on: ubuntu-latest
