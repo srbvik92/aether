@@ -8,9 +8,10 @@
  *   - Tool output is capped at MAX_OUTPUT_CHARS to avoid flooding the context window
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from 'fs'
-import { join, resolve, relative, dirname } from 'path'
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, unlinkSync, renameSync, rmdirSync } from 'fs'
+import { join, resolve, relative, dirname, basename } from 'path'
 import { spawn } from 'child_process'
+import { net } from 'electron'
 import Anthropic from '@anthropic-ai/sdk'
 import { getGitStatus, getGitDiff, getGitLog, gitAdd, gitCommit, isGitRepo } from './git'
 import { bm25Search } from './semantic-search'
@@ -20,13 +21,15 @@ import {
   browserGetText, browserScreenshot, browserEval, browserClose
 } from './browser-tool'
 
-// Callback that pauses the agent and asks the user to approve a file write
+// Callback that pauses the agent and asks the user to approve a file write.
+// Returns false if rejected, or the string content to write if approved
+// (may differ from `after` when the user accepted only some hunks).
 export type DiffApprovalFn = (
   path: string,
   before: string,
   after: string,
   isNew: boolean
-) => Promise<boolean>
+) => Promise<string | false>
 
 // ── Output cap ────────────────────────────────────────────────────────────────
 const MAX_OUTPUT_CHARS = 50_000
@@ -127,13 +130,14 @@ function strReplace(
     const after = before.replace(oldStr, newStr)
 
     if (onDiffRequest) {
-      const approved = await onDiffRequest(filePath, before, after, false)
-      if (!approved) {
+      const result = await onDiffRequest(filePath, before, after, false)
+      if (result === false) {
         return { output: `Edit to "${filePath}" was rejected by the user.`, isError: false }
       }
+      writeFileSync(abs, result, 'utf-8')
+    } else {
+      writeFileSync(abs, after, 'utf-8')
     }
-
-    writeFileSync(abs, after, 'utf-8')
     // Report what changed
     const oldLines = oldStr.split('\n').length
     const newLines = newStr.split('\n').length
@@ -161,12 +165,21 @@ async function writeFile(
 
   // Ask user to approve the diff (if callback provided)
   if (onDiffRequest) {
-    const approved = await onDiffRequest(filePath, before, content, isNew)
-    if (!approved) {
+    const result = await onDiffRequest(filePath, before, content, isNew)
+    if (result === false) {
       return {
         output: `Write to "${filePath}" was rejected by the user. Do not retry this write unless the user asks you to.`,
         isError: false
       }
+    }
+    const dir = dirname(abs)
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    writeFileSync(abs, result, 'utf-8')
+    return {
+      output: isNew
+        ? `Created ${filePath} (${result.length} chars)`
+        : `Updated ${filePath} (${result.length} chars)`,
+      isError: false
     }
   }
 
@@ -179,6 +192,115 @@ async function writeFile(
       : `Updated ${filePath} (${content.length} chars)`,
     isError: false
   }
+}
+
+// ── delete_file ───────────────────────────────────────────────────────────────
+async function deleteFile(
+  filePath: string,
+  workspace: string,
+  onDiffRequest?: DiffApprovalFn
+): Promise<ToolResult> {
+  const abs = safePath(workspace, filePath)
+  if (!existsSync(abs)) return { output: `File not found: ${filePath}`, isError: true }
+
+  const stat = statSync(abs)
+  if (stat.isDirectory()) {
+    // Only allow deleting empty directories via this tool
+    const entries = readdirSync(abs)
+    if (entries.length > 0) {
+      return {
+        output: `"${filePath}" is a non-empty directory. Use run_command to delete directories with contents.`,
+        isError: true
+      }
+    }
+  }
+
+  // Show the file contents as a "deletion diff" — before = content, after = empty
+  if (onDiffRequest) {
+    const before = stat.isDirectory() ? '(empty directory)' : (() => {
+      try { return readFileSync(abs, 'utf-8') } catch { return '(binary file)' }
+    })()
+    const result = await onDiffRequest(filePath, before, '', false)
+    if (result === false) {
+      return { output: `Deletion of "${filePath}" was rejected by the user.`, isError: false }
+    }
+  }
+
+  if (stat.isDirectory()) {
+    rmdirSync(abs)
+  } else {
+    unlinkSync(abs)
+  }
+  return { output: `Deleted ${filePath}`, isError: false }
+}
+
+// ── rename_file ───────────────────────────────────────────────────────────────
+async function renameFile(
+  oldPath: string,
+  newPath: string,
+  workspace: string,
+  onDiffRequest?: DiffApprovalFn
+): Promise<ToolResult> {
+  const absOld = safePath(workspace, oldPath)
+  const absNew = safePath(workspace, newPath)
+
+  if (!existsSync(absOld)) return { output: `File not found: ${oldPath}`, isError: true }
+  if (existsSync(absNew))  return { output: `Destination already exists: ${newPath}. Choose a different name.`, isError: true }
+
+  // Show as a diff: before = "Rename: old → new\n<content>", after = same content at new path
+  if (onDiffRequest) {
+    const content = (() => { try { return readFileSync(absOld, 'utf-8') } catch { return '(binary file)' } })()
+    const before  = `// RENAME: ${oldPath}\n${content}`
+    const after   = `// RENAME TO: ${newPath}\n${content}`
+    const result = await onDiffRequest(oldPath, before, after, false)
+    if (result === false) {
+      return { output: `Rename of "${oldPath}" was rejected by the user.`, isError: false }
+    }
+  }
+
+  const destDir = dirname(absNew)
+  if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+  renameSync(absOld, absNew)
+  return { output: `Renamed ${oldPath} → ${newPath}`, isError: false }
+}
+
+// ── move_file ─────────────────────────────────────────────────────────────────
+async function moveFile(
+  sourcePath: string,
+  destPath: string,
+  workspace: string,
+  onDiffRequest?: DiffApprovalFn
+): Promise<ToolResult> {
+  const absSrc  = safePath(workspace, sourcePath)
+  const absDest = safePath(workspace, destPath)
+
+  if (!existsSync(absSrc)) return { output: `Source not found: ${sourcePath}`, isError: true }
+
+  // If dest is an existing directory, move into it
+  let finalDest = absDest
+  if (existsSync(absDest) && statSync(absDest).isDirectory()) {
+    finalDest = join(absDest, basename(absSrc))
+  }
+  const finalRelative = relative(workspace, finalDest)
+
+  if (existsSync(finalDest)) {
+    return { output: `Destination already exists: ${finalRelative}. Delete it first or use a different destination.`, isError: true }
+  }
+
+  if (onDiffRequest) {
+    const content = (() => { try { return readFileSync(absSrc, 'utf-8') } catch { return '(binary file)' } })()
+    const before  = `// MOVE FROM: ${sourcePath}\n${content}`
+    const after   = `// MOVE TO: ${finalRelative}\n${content}`
+    const result = await onDiffRequest(sourcePath, before, after, false)
+    if (result === false) {
+      return { output: `Move of "${sourcePath}" was rejected by the user.`, isError: false }
+    }
+  }
+
+  const destDir = dirname(finalDest)
+  if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+  renameSync(absSrc, finalDest)
+  return { output: `Moved ${sourcePath} → ${finalRelative}`, isError: false }
 }
 
 function listDirectory(dirPath: string, workspace: string): ToolResult {
@@ -278,7 +400,6 @@ function runCommand(
   const dangerous = isDangerousCommand(command)
   const cmdLower  = command.trim().toLowerCase()
   const trusted   = !dangerous && (
-    ALWAYS_TRUSTED.some(t => cmdLower.startsWith(t.toLowerCase())) ||
     _trustedCommands.some(t => cmdLower.startsWith(t.toLowerCase()))
   )
 
@@ -515,49 +636,50 @@ function stripHtml(html: string): string {
 }
 
 async function fetchUrl(url: string): Promise<ToolResult> {
+  if (!url?.trim()) {
+    return { output: 'fetch_url requires a URL. Provide the full URL including https://', isError: true }
+  }
+  try { new URL(url) } catch {
+    return { output: `Invalid URL: ${JSON.stringify(url)}. Must be a full URL starting with https://`, isError: true }
+  }
+  const content = await fetchPageContent(url)
+  if (content === null) {
+    return { output: `Could not fetch ${url} — the site may be down or blocking automated requests.`, isError: true }
+  }
+  return { output: `[Fetched: ${url}]\n\n${content}`, isError: false }
+}
+
+/** Fetch a URL and return cleaned text — shared by webSearch, fetch_url, and URL pre-fetch IPC */
+export async function fetchPageContent(url: string): Promise<string | null> {
   try {
-    const response = await fetch(url, {
+    const res = await net.fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; AI-Coding-Assistant/1.0)',
-        'Accept': 'text/html,application/xhtml+xml,text/plain,*/*'
+        'Accept': 'text/html,application/xhtml+xml,text/plain,*/*',
       },
-      signal: AbortSignal.timeout(15_000)
+      signal: AbortSignal.timeout(8_000),
     })
-
-    if (!response.ok) {
-      return { output: `HTTP ${response.status} ${response.statusText} — could not fetch ${url}`, isError: true }
+    if (!res.ok) return null
+    const ct  = res.headers.get('content-type') ?? ''
+    const raw = await res.text()
+    if (ct.includes('text/html')) {
+      const titleM = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+      const title  = titleM ? stripHtml(titleM[1]).trim() : ''
+      const mainM  = raw.match(/<(?:main|article)[^>]*>([\s\S]*?)<\/(?:main|article)>/i)
+      const body   = stripHtml(mainM ? mainM[1] : raw).trim()
+      const text   = (title ? `# ${title}\n\n` : '') + body
+      return text.length > 12_000 ? text.slice(0, 12_000) + '\n[...truncated]' : text
     }
-
-    const contentType = response.headers.get('content-type') ?? ''
-    const raw = await response.text()
-
-    let content: string
-    if (contentType.includes('text/html')) {
-      // Try to extract <title> and <main>/<article> first for a cleaner result
-      const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-      const title = titleMatch ? stripHtml(titleMatch[1]) : ''
-
-      // Prefer main content areas over full body
-      const mainMatch = raw.match(/<(?:main|article)[^>]*>([\s\S]*?)<\/(?:main|article)>/i)
-      const body = stripHtml(mainMatch ? mainMatch[1] : raw)
-
-      content = (title ? `# ${title}\n\n` : '') + body
-    } else {
-      content = raw
-    }
-
-    const truncated = content.length > 20_000
-      ? content.slice(0, 20_000) + `\n\n[... content truncated at 20,000 chars ...]`
-      : content
-
-    return { output: `[Fetched: ${url}]\n\n${truncated}`, isError: false }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { output: `Failed to fetch ${url}: ${msg}`, isError: true }
+    return raw.length > 12_000 ? raw.slice(0, 12_000) + '\n[...truncated]' : raw
+  } catch {
+    return null
   }
 }
 
 async function webSearch(query: string, apiKey: string): Promise<ToolResult> {
+  if (!query?.trim()) {
+    return { output: 'web_search requires a query — the query argument was empty or missing.', isError: true }
+  }
   if (!apiKey?.trim()) {
     return {
       output: 'Web search requires a Brave Search API key.\nAdd it in Settings → Web Search → Brave API Key.\nGet a free key at https://brave.com/search/api/ (2,000 queries/month free).',
@@ -566,8 +688,8 @@ async function webSearch(query: string, apiKey: string): Promise<ToolResult> {
   }
 
   try {
-    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8&text_decorations=false`
-    const response = await fetch(url, {
+    const searchUrl = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5&text_decorations=false`
+    const response = await net.fetch(searchUrl, {
       headers: {
         'Accept': 'application/json',
         'Accept-Encoding': 'gzip',
@@ -589,19 +711,26 @@ async function webSearch(query: string, apiKey: string): Promise<ToolResult> {
       return { output: `No results found for: "${query}"`, isError: false }
     }
 
-    const formatted = results.map((r, i) =>
-      `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description ?? ''}`
+    // Build the results list
+    const lines = results.map((r, i) =>
+      `${i + 1}. **${r.title}**\n   URL: ${r.url}\n   ${r.description ?? ''}`
     ).join('\n\n')
 
-    // Append a directive so the AI fetches actual page content rather than
-    // answering from snippet summaries, which are often incomplete.
-    const fetchDirective =
-      '\n\n📖 These are snippet summaries only. ' +
-      'Call fetch_url on the 1–3 most relevant URLs above to read their full content ' +
-      'before forming your answer. If the results do not answer the question, ' +
-      'call web_search again with different or more specific keywords.'
+    // Automatically fetch and inline content from the top 2 results so the AI
+    // does not need a separate fetch_url call (same pattern as Claude web search)
+    const topTwo = results.slice(0, 2)
+    const fetched = await Promise.all(
+      topTwo.map(async r => {
+        const content = await fetchPageContent(r.url)
+        return content
+          ? `\n\n---\n### Full content: ${r.title}\nURL: ${r.url}\n\n${content}\n---`
+          : null
+      })
+    )
+    const inlined = fetched.filter(Boolean).join('')
 
-    return { output: `Web search results for "${query}":\n\n${formatted}${fetchDirective}`, isError: false }
+    const out = `Web search results for "${query}":\n\n${lines}${inlined}`
+    return { output: out, isError: false }
   } catch (err) {
     return { output: `Search failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
   }
@@ -899,8 +1028,14 @@ export async function executeTool(
   }
 
   // Web tools don't need a workspace
-  if (name === 'fetch_url') return fetchUrl(input.url as string)
-  if (name === 'web_search') return webSearch(input.query as string, braveApiKey ?? '')
+  if (name === 'fetch_url') {
+    const url = (input.url ?? input.URL ?? input.uri ?? '') as string
+    return fetchUrl(url)
+  }
+  if (name === 'web_search') {
+    const query = (input.query ?? input.q ?? input.search_query ?? '') as string
+    return webSearch(query, braveApiKey ?? '')
+  }
 
   if (!workspacePath) {
     return {
@@ -909,26 +1044,41 @@ export async function executeTool(
     }
   }
 
+  // Fuzzy argument resolver — AI models (especially GPT) sometimes use different
+  // key names than the schema specifies. Try common aliases before giving up.
+  const p  = (input.path ?? input.file ?? input.filename ?? input.filepath ?? input.file_path ?? '') as string
+  const p2 = (input.new_path ?? input.dest ?? input.destination ?? input.dest_path ?? '') as string
+  const cmd = (input.command ?? input.cmd ?? input.run ?? input.script ?? '') as string
+
+  // Guards: required args must be non-empty — return clean errors instead of crashing
+  const FILE_TOOLS = ['read_file','read_file_range','write_file','str_replace','delete_file','rename_file','move_file']
+  if (FILE_TOOLS.includes(name) && !p?.trim()) {
+    return { output: `Tool "${name}" requires a "path" argument — none was provided. Call the tool again with path set to the file you want to operate on.`, isError: true }
+  }
+  if (name === 'run_command' && !cmd?.trim()) {
+    return { output: 'Tool "run_command" requires a "command" argument — none was provided. Call the tool again with command set to the shell command you want to run.', isError: true }
+  }
+
   try {
     switch (name) {
       case 'read_file':
-        return readFile(input.path as string, workspacePath)
+        return readFile(p, workspacePath)
       case 'read_file_range':
-        return readFileRange(input.path as string, input.start_line as number, input.end_line as number, workspacePath)
+        return readFileRange(p, input.start_line as number, input.end_line as number, workspacePath)
       case 'str_replace':
-        return strReplace(input.path as string, input.old_str as string, input.new_str as string, workspacePath, onDiffRequest)
+        return strReplace(p, input.old_str as string, input.new_str as string, workspacePath, onDiffRequest)
       case 'write_file':
-        return writeFile(input.path as string, input.content as string, workspacePath, onDiffRequest)
+        return writeFile(p, input.content as string, workspacePath, onDiffRequest)
       case 'list_directory':
-        return listDirectory((input.path as string) || '.', workspacePath)
+        return listDirectory(p || '.', workspacePath)
       case 'search_files':
-        return searchFiles(input.pattern as string, (input.path as string) || '.', workspacePath)
+        return searchFiles(input.pattern as string, p || '.', workspacePath)
       case 'run_command':
-        return runCommand(input.command as string, workspacePath, onOutputChunk, callId)
+        return runCommand(cmd, workspacePath, onOutputChunk, callId)
       case 'git_status':
         return toolGitStatus(workspacePath)
       case 'git_diff':
-        return toolGitDiff(!!(input.staged), input.path as string | undefined, workspacePath)
+        return toolGitDiff(!!(input.staged), p || undefined, workspacePath)
       case 'git_log':
         return toolGitLog((input.count as number) ?? 10, workspacePath)
       case 'git_add':
@@ -966,6 +1116,12 @@ export async function executeTool(
         return browserClose()
       case 'run_docker':
         return runDocker(input.image as string, input.command as string, workspacePath, onOutputChunk)
+      case 'delete_file':
+        return deleteFile(p, workspacePath, onDiffRequest)
+      case 'rename_file':
+        return renameFile((input.old_path ?? p) as string, p2, workspacePath, onDiffRequest)
+      case 'move_file':
+        return moveFile((input.source_path ?? input.source ?? p) as string, (input.dest_path ?? input.dest ?? p2) as string, workspacePath, onDiffRequest)
       default: {
         // Check custom plugins loaded from .ai-context/tools/
         const plugin = _customPlugins.find(p => p.name === name)
@@ -1402,6 +1558,53 @@ export const ANTHROPIC_TOOLS: Anthropic.Tool[] = [
       required: ['image', 'command']
     }
   },
+  {
+    name: 'delete_file',
+    description:
+      'Delete a file (or empty directory) in the workspace. ' +
+      'The user will see the file contents and must approve before deletion. ' +
+      'Do NOT use this for directories with contents — use run_command for that. ' +
+      'Prefer this over "run_command rm" so the user gets a proper approval dialog.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: { type: 'string', description: 'Relative path to the file to delete, e.g. "src/old-component.tsx"' }
+      },
+      required: ['path']
+    }
+  },
+  {
+    name: 'rename_file',
+    description:
+      'Rename a file or directory within the workspace. ' +
+      'The user will see the old and new name and must approve. ' +
+      'Use this instead of "run_command mv" so the rename goes through the proper approval flow. ' +
+      'The destination must not already exist.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        old_path: { type: 'string', description: 'Current relative path, e.g. "src/Button.tsx"' },
+        new_path: { type: 'string', description: 'New relative path, e.g. "src/components/Button.tsx"' }
+      },
+      required: ['old_path', 'new_path']
+    }
+  },
+  {
+    name: 'move_file',
+    description:
+      'Move a file or directory to a different location in the workspace. ' +
+      'The user will see the source and destination and must approve. ' +
+      'Use this instead of "run_command mv" so the move goes through the proper approval flow. ' +
+      'If the destination is an existing directory, the file is moved inside it.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        source_path: { type: 'string', description: 'Relative path of the file to move, e.g. "utils/helper.ts"' },
+        dest_path:   { type: 'string', description: 'Destination path or directory, e.g. "src/utils/helper.ts"' }
+      },
+      required: ['source_path', 'dest_path']
+    }
+  },
 ]
 
 // Tools that require a workspace folder — excluded from the AI's tool list when
@@ -1412,6 +1615,7 @@ const WORKSPACE_TOOL_NAMES = new Set([
   'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit',
   'semantic_search', 'remember', 'write_plan', 'update_project_summary',
   'query_database',
+  'delete_file', 'rename_file', 'move_file',
 ])
 
 /**

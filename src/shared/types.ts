@@ -60,6 +60,18 @@ export interface AppSettings {
   apiServerEnabled?: boolean   // expose local REST API on apiServerPort
   apiServerPort?:    number    // default 39400
 
+  // ── OpenAI OAuth (Sign in with OpenAI — uses ChatGPT subscription) ──────────
+  openaiOAuth?: {
+    accessToken:   string
+    refreshToken?: string
+    expiresAt?:    number   // Unix ms
+    tokenType:     string
+    email?:        string
+    name?:         string
+    planType?:     string   // 'free' | 'plus' | 'pro' | 'business' | 'enterprise'
+    accountId?:    string   // chatgpt_account_id — sent as ChatGPT-Account-ID header
+  }
+
   // ── MCP Servers ───────────────────────────────────────────────────────────
   mcpServers?: McpServerConfig[]
 
@@ -93,6 +105,22 @@ export interface AppSettings {
   // When true, all non-dangerous commands run without the approval modal.
   // Dangerous commands (rm -rf, git reset --hard, etc.) always require approval.
   autoApproveCommands?: boolean
+
+  // ── Fast / lightweight model ──────────────────────────────────────────────
+  // When set, lightweight tasks (auto-title, inline completions) use this
+  // model instead of the primary model, saving cost and latency.
+  fastModel?: string   // e.g. "claude-haiku-4-5", "gpt-4o-mini"
+
+  // ── Feature flags ─────────────────────────────────────────────────────────
+  features?: {
+    httpBuilder?:      boolean   // HTTP Request Builder panel
+    dependencyAudit?:  boolean   // Dependency Audit panel
+    dockerManager?:    boolean   // Docker Manager panel
+    regexTester?:      boolean   // Regex Tester panel
+    dbBrowser?:        boolean   // Database Browser panel
+    testRunner?:       boolean   // Test Runner panel
+    embeddedBrowser?:  boolean   // Embedded Browser with provider connectors
+  }
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -101,92 +129,111 @@ export const DEFAULT_SETTINGS: AppSettings = {
   baseUrl: 'https://api.anthropic.com',
   model: 'claude-opus-4-6',
   maxTokens: 8096,
-  systemPrompt: `You are an expert coding assistant with direct access to the user's codebase via tools.
+  systemPrompt: `You are an elite software engineer — deeply experienced, precise, and relentless. You have direct access to the user's codebase through tools and you do not stop working until the task is fully, verifiably complete.
 
-## How to approach tasks
+## Core philosophy
 
-**Before touching any file:**
-1. Use list_directory to understand the project structure
-2. Use search_files to find relevant code (function names, imports, patterns)
-3. Use read_file to read files you will modify — never edit blind
-4. **Call write_plan before making any changes** — list every file you will touch, what you will do to each, and any shared types/interfaces that must stay consistent
+You finish what you start. A task is not done until:
+1. Every file that needed changing has been changed
+2. The code compiles / type-checks with zero errors
+3. Relevant tests pass (or you wrote new ones and they pass)
+4. You have read back every file you touched and confirmed the change landed correctly
 
-**When editing files:**
-- ALWAYS prefer str_replace over write_file for modifying existing files
-- str_replace makes surgical, reviewable changes — write_file replaces everything
-- Include enough surrounding context in old_str to make it unique (3–5 lines)
-- Make one logical change at a time, not many unrelated edits in one go
-- Do not change code you were not asked to change
-- For large files (>300 lines), use read_file_range to read only the relevant section instead of the whole file
+"I think that should work" is never acceptable. Verify — always.
 
-**After making changes:**
-- The file content is shown automatically after each str_replace or write_file
-- Read it to verify your change landed correctly before continuing
-- If a test suite exists, run it with run_command and fix any failures before reporting done
-- Do not say "done" until you have verified the change works
+## Phase 1 — Understand before touching anything
 
-## Multi-file tasks
+Before writing a single character of code:
+1. Run list_directory on the project root to map the structure
+2. Run search_files to locate every file relevant to the task (by function name, type name, import path, etc.)
+3. Run read_file on every file you will modify — never edit blind
+4. Identify all shared types, interfaces, and contracts that must stay consistent across files
+5. State your plan: one line per file — what you will change and why
 
-When a task spans multiple files:
-1. Explore ALL affected files first, before editing any of them
-2. Call write_plan — list every file, the change, and shared contracts
-3. Make changes in dependency order — types/interfaces first, then implementations, then callers
-4. After all edits, do a final search_files pass to catch any references you missed
+If the task is large, break it into phases. Complete each phase fully before starting the next.
 
-## Error handling
+## Phase 2 — Edit with surgical precision
 
-If a tool returns an error:
-- Read the error carefully — do not guess
-- Re-read the relevant file to understand the current state
-- Form a hypothesis about what went wrong
-- Try a different approach — do not repeat the same failing call
-- If you are stuck after two attempts, explain what you tried and ask the user for guidance
+- **ALWAYS use str_replace** for existing files — it makes changes reviewable and atomic
+- Use write_file only for brand-new files that do not exist yet
+- Each str_replace must include 3–5 lines of surrounding context so the match is unambiguous
+- Make one logical change at a time — do not bundle unrelated edits
+- Never touch code outside the scope of the current task
+- For files over 300 lines, use read_file_range to read only the section you need
 
-## Communication style
+**Dependency order for multi-file changes:**
+Types/interfaces → shared utilities → implementations → callers → tests
 
-- Be concise. Skip filler phrases like "Certainly!" or "Great question!"
-- When you make a change, briefly explain WHAT you changed and WHY
-- If a task is ambiguous, ask ONE focused clarifying question before proceeding
-- When you call write_plan, briefly summarise the plan in your reply too (one sentence per file)
-- If you cannot do something safely, say so clearly instead of doing it wrong
-- Use a short bullet list when summarising multiple changes — do not write paragraphs
+## Phase 3 — Verify every change
 
-## What you must never do
+After each edit:
+1. Read back the modified section with read_file or read_file_range
+2. Confirm the change appears exactly as intended — no stray whitespace, no missing lines
+3. If the project has a type-checker (tsc, mypy, cargo check, etc.), run it after every significant change
+4. If tests exist, run them. If they fail, fix them before moving on — never leave a broken test suite
 
-- Never delete or overwrite code you weren't asked to change
-- Never make up file contents — always read first
-- Never run destructive commands (rm -rf, DROP TABLE, git reset --hard, etc.) without explicit user confirmation
-- Never expose API keys or secrets found in files
-- Never assume a library is available — check package.json / imports first
+## Handling errors — never give up
+
+When a tool call returns an error or a command fails:
+1. Read the full error message — every word
+2. Re-read the relevant file section to understand the actual current state
+3. Form a specific hypothesis about the root cause
+4. Try a targeted fix — do not repeat the same failing call
+5. If two attempts fail, try a completely different approach
+6. Only ask the user for guidance after exhausting at least three distinct approaches
+
+Compilation errors, test failures, and type errors are YOUR problem to fix, not the user's.
+
+## Multi-file and large tasks
+
+- Explore ALL affected files before editing any of them
+- Keep a mental (or written) checklist of every file that needs a change
+- After completing all edits, run search_files one final time to catch any references you missed
+- Cross-file consistency: if you change a function signature, find and update every caller
+- If you add a new exported symbol, check whether it needs to be re-exported from an index file
+
+## Code quality standards
+
+- Match the style, formatting, and naming conventions of the surrounding code exactly
+- Do not introduce new dependencies without checking package.json first
+- Do not leave TODO comments, console.log debug lines, or dead code behind
+- If you must make a trade-off, explain it clearly and ask if it is acceptable
+- Security: never log, expose, or hard-code API keys, tokens, or secrets
 
 ## Web research
 
-- When the user's message contains a URL (starting with http:// or https://), always use fetch_url to read its content before answering
-- Use web_search to look up current information, documentation, error messages, or anything not in the codebase
-- **Research process:** search → fetch the top 1–3 result pages → cross-reference if sources disagree → then answer
-- If the first search result does not answer the question, search again with different keywords — do not give up after one query
-- Always cite the URL source when using fetched content
+- If the user's message contains a URL, always fetch_url it before answering
+- Use web_search for: current API docs, error messages you don't recognise, library versions, best practices
+- Research process: search → fetch the top 2–3 pages → cross-reference → then answer
+- If the first search doesn't resolve it, rephrase and search again — do not give up after one query
+- Cite URLs when you use fetched content
 
-## Memory tools
+## Communication
 
-- Use **remember** to save project-specific facts (stored in \`.ai-memory/notes.md\` in the workspace)
-- Use **remember_globally** to save facts that apply to ALL projects: user preferences, name, coding style, deployment targets, etc. These are injected into every conversation automatically.
-- When the user states a preference like "I always use Tailwind" or "call me Alex", call remember_globally immediately without being asked
+- Be direct and concise — no filler like "Certainly!" or "Great question!"
+- Lead with what you are doing, not why you are great at it
+- When summarising changes, use a tight bullet list — one line per file changed
+- If something is ambiguous, ask exactly ONE focused question before proceeding
+- When you hit a blocker, describe: what you tried, what happened, and what you need
+
+## Memory
+
+- Call remember to save project-specific facts (tech stack decisions, architecture notes, known gotchas) to \`.ai-memory/notes.md\`
+- Call remember_globally for facts that apply across all projects: user's name, preferred style, deployment targets, personal conventions
+- Trigger remember_globally immediately when the user states a preference — do not wait to be asked
 
 ## Project summary
 
-After completing any significant coding task (adding a feature, refactoring, fixing a bug, changing architecture), call update_project_summary with a fully up-to-date PROJECT.md.
-
-The summary must be written so a developer (or another AI tool) can immediately understand the project and continue work without scanning all the files. Include:
+After any significant task (new feature, refactor, bug fix, architecture change), call update_project_summary to write a current PROJECT.md. It must enable a developer — or another AI — to immediately understand and continue the work. Include:
 - What the project does (2–3 sentences)
-- Tech stack and key dependencies
-- Architecture overview (how the pieces connect)
-- Key files table (file → what it does)
-- Conventions and patterns used in this codebase
-- Recent changes made this session
-- Anything currently in progress or known issues
+- Tech stack and key dependencies with versions
+- Architecture overview: how the main pieces connect
+- Key files table: file path → what it owns
+- Conventions: naming, file structure, state management, testing approach
+- What changed this session and why
+- Known issues or decisions that need revisiting
 
-Keep it factual and specific — no generic filler. Update it even if a previous summary exists; always overwrite with the latest state.`,
+Overwrite any existing summary — always keep it current.`,
   theme: 'dark',
   // Vertex
   vertexProjectId: '',
@@ -219,6 +266,7 @@ Keep it factual and specific — no generic filler. Update it even if a previous
   ],
   recentWorkspaces: [],
   requireEditApproval: true,
+  features: {},
 }
 
 // ─── Models per provider ────────────────────────────────────────────────────
@@ -230,10 +278,29 @@ export const PROVIDER_MODELS: Record<Provider, string[]> = {
     'claude-haiku-4-5'
   ],
   openai: [
+    // ── GPT-5 family (2025) ─────────────────────────────────────────────────
+    'gpt-5',
+    'gpt-5.1',
+    'gpt-5.2',
+    'gpt-5.3',
+    'gpt-5.4',
+    'gpt-5.5',
+    // ── GPT-4.1 family (2025) ───────────────────────────────────────────────
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4.1-nano',
+    // ── O-series reasoning models ───────────────────────────────────────────
+    'o4-mini',
+    'o3',
+    'o3-mini',
+    'o1',
+    'o1-mini',
+    // ── GPT-4o family ────────────────────────────────────────────────────────
     'gpt-4o',
     'gpt-4o-mini',
+    // ── Legacy ───────────────────────────────────────────────────────────────
     'gpt-4-turbo',
-    'gpt-3.5-turbo'
+    'gpt-3.5-turbo',
   ],
   gemini: [
     'gemini-3.1-pro-preview',
@@ -358,8 +425,10 @@ export interface ToolCallDisplay {
   output?:           string
   liveOutput?:       string   // streaming output while status === 'running'
   isError:           boolean
-  status:            'running' | 'done' | 'error' | 'awaiting-approval'
+  status:            'running' | 'done' | 'error' | 'awaiting-approval' | 'stopped'
   approvalId?:       string   // set while waiting for cmd approval — used to reject via Stop
+  diffPayload?:      DiffRequestPayload   // set when this tool call triggered a diff approval
+  diffId?:           string               // the diff approval ID
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
@@ -369,6 +438,11 @@ export type MessageRole = 'user' | 'assistant' | 'system'
 export interface ChangedFile {
   path:      string
   operation: 'created' | 'modified'
+}
+
+export interface UrlFetch {
+  url:     string
+  content: string   // cleaned page text injected into AI context
 }
 
 export interface ChatMessage {
@@ -384,6 +458,8 @@ export interface ChatMessage {
   changedFiles?: ChangedFile[]   // files written during this AI turn
   snapshotId?:  string           // snapshot ID — set when undo is available
   rating?:      'up' | 'down'   // user thumbs up/down rating (AI messages only)
+  agentMode?:   boolean          // true when this message was generated in Agent mode
+  urlFetches?:  UrlFetch[]       // pre-fetched URL content (shown collapsed in UI, injected into AI context)
 }
 
 export type ConversationMode = 'code' | 'agent' | 'voice' | 'review' | 'pair'
@@ -399,6 +475,12 @@ export interface Conversation {
   tags?: string[]
   mode?: ConversationMode
   workspacePath?: string  // per-conversation folder; AI tools are restricted to this path
+
+  // ── Branching ────────────────────────────────────────────────────────────
+  /** ID of the conversation this was forked from (undefined = root) */
+  parentConversationId?: string
+  /** Message ID in the parent at which the fork was created */
+  branchFromMessageId?:  string
 }
 
 // ─── Shell command approval ────────────────────────────────────────────────
@@ -457,11 +539,13 @@ export const IPC = {
   EXPORT_CHAT:        'chat:export',
   PICK_FOLDER:            'dialog:pickFolder',
   OPENROUTER_GET_MODELS:  'openrouter:getModels',
+  OPENAI_GET_MODELS:      'openai:getModels',
   TOOL_CALL_START:    'tool:start',
   TOOL_CALL_RESULT:   'tool:result',
   TOOL_OUTPUT_CHUNK:  'tool:outputChunk',
   DIFF_REQUEST:       'diff:request',
   DIFF_RESPONSE:      'diff:response',
+  DIFF_ATTACH:        'diff:attach',
   WORKSPACE_INDEXED:  'workspace:indexed',
   GIT_STATUS_GET:     'git:statusGet',
   // Auto-updater
@@ -518,6 +602,9 @@ export const IPC = {
   PINS_WRITE:             'pins:write',             // invoke — write .ai-context/pins.json
   // Inline file editor
   WORKSPACE_WRITE_FILE:   'workspace:writeFile',    // invoke — write a file in the workspace
+  WORKSPACE_DELETE_FILE:  'workspace:deleteFile',   // invoke — delete a file or empty dir
+  WORKSPACE_RENAME_FILE:  'workspace:renameFile',   // invoke — rename/move a file or dir
+  WORKSPACE_NEW_FOLDER:   'workspace:newFolder',    // invoke — create a new directory
   // Custom tool plugins
   PLUGINS_LIST:           'plugins:list',           // invoke — list loaded .ai-context/tools/*.js plugins
   // Scheduled tasks
@@ -548,6 +635,14 @@ export const IPC = {
   MCP_LIST_SERVERS:     'mcp:listServers',
   MCP_TEST_SERVER:      'mcp:testServer',
   MCP_STOP_SERVER:      'mcp:stopServer',
+  // MCP OAuth
+  MCP_OAUTH_START:      'mcp:oauthStart',   // invoke — start OAuth PKCE flow
+  MCP_OAUTH_REFRESH:    'mcp:oauthRefresh', // invoke — refresh an existing token
+  MCP_OAUTH_REVOKE:     'mcp:oauthRevoke',  // invoke — clear saved token
+  // OpenAI OAuth (Sign in with OpenAI / ChatGPT subscription)
+  OPENAI_OAUTH_LOGIN:   'openai:oauthLogin',   // invoke — start browser login
+  OPENAI_OAUTH_REFRESH: 'openai:oauthRefresh', // invoke — refresh access token
+  OPENAI_OAUTH_LOGOUT:  'openai:oauthLogout',  // invoke — clear stored token
   // RAG injection notification
   RAG_INJECTED:         'rag:injected',
   // Jira integration
@@ -581,7 +676,109 @@ export const IPC = {
   // Log viewer
   LOG_READ:             'log:read',       // invoke — returns last N log entries
   LOG_GET_PATH:         'log:getPath',    // invoke — returns path to current log file
+  // Database browser
+  DB_QUERY:             'db:query',       // invoke — run a SQL query, returns markdown table
+  DB_LIST_TABLES:       'db:listTables',  // invoke — list tables and row counts
+  // Test runner
+  TEST_RUN:             'test:run',       // invoke — start a test run
+  TEST_ABORT:           'test:abort',     // invoke — kill the running test process
+  TEST_CHUNK:           'test:chunk',     // push  — streaming output chunk
+  TEST_DONE:            'test:done',      // push  — test run finished
+  TEST_WATCH_TOGGLE:    'test:watchToggle', // invoke — start/stop file-change watcher
+  TEST_WATCH_FIRED:     'test:watchFired',  // push  — file changed, auto-rerun triggered
+  // Playwright
+  PLAYWRIGHT_OPEN_REPORT: 'playwright:openReport', // invoke — open HTML report in browser
+  // Docker manager
+  DOCKER_CHECK:           'docker:check',           // invoke — check if Docker daemon is running
+  DOCKER_LIST_CONTAINERS: 'docker:listContainers',  // invoke — list all containers
+  DOCKER_LIST_IMAGES:     'docker:listImages',      // invoke — list all images
+  DOCKER_LIST_VOLUMES:    'docker:listVolumes',     // invoke — list all volumes
+  DOCKER_CONTAINER_ACTION:'docker:containerAction', // invoke — start/stop/restart/remove/pause
+  DOCKER_GET_LOGS:        'docker:getLogs',         // invoke — get recent logs (static)
+  DOCKER_STREAM_LOGS:     'docker:streamLogs',      // invoke — start streaming logs
+  DOCKER_STOP_LOGS:       'docker:stopLogs',        // invoke — stop streaming logs
+  DOCKER_LOG_CHUNK:       'docker:logChunk',        // push   — log chunk from streaming
+  DOCKER_IMAGE_ACTION:    'docker:imageAction',     // invoke — remove image
+  DOCKER_VOLUME_ACTION:   'docker:volumeAction',    // invoke — remove volume
+  DOCKER_STATS:           'docker:stats',           // invoke — get container CPU/mem stats
+
+  // ── Dependency Audit ─────────────────────────────────────────────────────
+  DEP_AUDIT:              'dep:audit',              // invoke — run audit in workspace
+
+  // ── Inline code completions ───────────────────────────────────────────────
+  COMPLETION_REQUEST:     'completion:request',     // invoke — AI inline completion for editor
+
+  // ── Git commit helpers ────────────────────────────────────────────────────
+  GIT_STAGED_DIFF:        'git:stagedDiff',         // invoke — get staged diff text
+  GIT_GENERATE_MSG:       'git:generateMsg',        // invoke — AI-generate a commit message
+  GIT_DO_COMMIT:          'git:doCommit',           // invoke — run git commit -m
+  // URL pre-fetch (renderer → main, bypasses CORS via net.fetch)
+  URL_FETCH:              'url:fetch',              // invoke — fetch URL, return cleaned text
+  GIT_STAGE_ALL:          'git:stageAll',           // invoke — git add -A
+  // Clipboard
+  CLIPBOARD_READ_IMAGE:   'clipboard:readImage',    // invoke — read image from clipboard as base64
 } as const
+
+// ── Docker types ──────────────────────────────────────────────────────────────
+export interface DockerContainer {
+  id:         string
+  name:       string
+  image:      string
+  state:      string   // running | exited | paused | created | restarting | dead
+  status:     string   // human-readable e.g. "Up 2 hours"
+  ports:      string
+  createdAt:  string
+  runningFor: string
+}
+
+export interface DockerImage {
+  id:         string
+  repository: string
+  tag:        string
+  size:       string
+  createdAt:  string
+}
+
+export interface DockerVolume {
+  name:       string
+  driver:     string
+  mountpoint: string
+}
+
+export interface DockerStats {
+  cpuPct:   string
+  memUsage: string
+  memPct:   string
+  netIO:    string
+  blockIO:  string
+  pids:     string
+}
+
+// ── Dependency Audit types ─────────────────────────────────────────────────────
+export type AuditSeverity = 'critical' | 'high' | 'moderate' | 'low' | 'info'
+
+export interface AuditVulnerability {
+  name:       string       // package name
+  severity:   AuditSeverity
+  title:      string       // short description
+  url:        string       // advisory URL
+  range:      string       // vulnerable version range
+  fixedIn:    string       // version that fixes it
+  via:        string[]     // dependency chain
+  isDirect:   boolean
+}
+
+export interface AuditResult {
+  manager:   'npm' | 'yarn' | 'pnpm' | 'pip' | 'cargo'
+  total:     number
+  critical:  number
+  high:      number
+  moderate:  number
+  low:       number
+  info:      number
+  vulns:     AuditVulnerability[]
+  raw:       string        // raw CLI output for "Ask AI"
+}
 
 export interface ScheduledTask {
   id:        string
@@ -607,15 +804,44 @@ export interface AgentPreset {
   createdAt:    number
 }
 
+// ─── MCP OAuth ─────────────────────────────────────────────────────────────
+
+/** OAuth 2.0 + PKCE configuration for a remote MCP server */
+export interface McpOAuthConfig {
+  authorizationUrl: string   // e.g. https://auth.example.com/oauth/authorize
+  tokenUrl:         string   // e.g. https://auth.example.com/oauth/token
+  clientId:         string
+  clientSecret?:    string   // optional — PKCE-only flows
+  scopes:           string   // space-separated, e.g. "read write"
+}
+
+/** Persisted token set for a remote MCP server */
+export interface McpOAuthToken {
+  accessToken:   string
+  refreshToken?: string
+  expiresAt?:    number   // Unix ms — undefined = non-expiring
+  tokenType:     string
+  scope?:        string
+}
+
 // ─── MCP Server Config ──────────────────────────────────────────────────────
 
 export interface McpServerConfig {
   id:      string
   name:    string
-  command: string
-  args?:   string[]
-  env?:    Record<string, string>
   enabled: boolean
+
+  // ── stdio (local process) ────────────────────────────────────────────────
+  serverType?: 'stdio' | 'remote'   // default 'stdio'
+  command?:    string               // required for stdio
+  args?:       string[]
+  env?:        Record<string, string>
+
+  // ── remote (HTTP / SSE) ──────────────────────────────────────────────────
+  serverUrl?:       string          // required for remote, e.g. https://api.example.com/mcp
+  requireApproval?: boolean         // if false, pass require_approval:"never" to OpenAI
+  oauth?:           McpOAuthConfig  // OAuth config — present = auth required
+  oauthToken?:      McpOAuthToken   // stored access token (after user connects)
 }
 
 export interface McpTool {
@@ -638,7 +864,7 @@ export interface GitStatusSummary {
 export interface ExportChatPayload {
   defaultName: string   // suggested filename without extension
   content:     string   // full file content
-  format:      'md' | 'txt'
+  format:      'md' | 'txt' | 'json'
 }
 
 // ─── Image attachments ─────────────────────────────────────────────────────
@@ -741,6 +967,13 @@ export interface DiffRequestPayload {
 export interface DiffResponsePayload {
   id:       string
   approved: boolean
+  content?: string   // optional modified content (for hunk-level partial accept)
+}
+
+export interface DiffAttachPayload {
+  diffId:  string
+  callId:  string
+  payload: DiffRequestPayload
 }
 
 export interface WorkspaceIndexPayload {

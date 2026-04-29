@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import {
   AppSettings,
   Provider,
@@ -14,6 +14,7 @@ import { useSemanticIndex } from '../hooks/useSemanticIndex'
 import type { SemanticSearchResult } from '../../../shared/types'
 import { PROMPT_TEMPLATES, findMatchingTemplate } from '../utils/promptTemplates'
 import { validateSettings, ValidationResult, hasErrors } from '../utils/settingsValidator'
+const McpServersPanel = lazy(() => import('./McpServersPanel'))
 
 interface Props {
   settings: AppSettings
@@ -131,7 +132,24 @@ function OllamaDetector({ onModelSelect }: { onModelSelect: (model: string) => v
         <span className="text-[10px] text-gray-400 dark:text-gray-600">Looks for Ollama at localhost:11434</span>
       </div>
       {detected && models.length === 0 && (
-        <p className="text-xs text-orange-500 dark:text-orange-400 mt-1.5">No Ollama models found. Is Ollama running?</p>
+        <div className="mt-2 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 p-2.5">
+          <p className="text-xs text-orange-700 dark:text-orange-300 font-medium">No Ollama models found</p>
+          <p className="text-[11px] text-orange-600 dark:text-orange-400 mt-0.5">Make sure Ollama is running, then pull a model:</p>
+          <div className="mt-1.5 flex flex-col gap-1">
+            {[
+              { cmd: 'ollama pull llama3.2',         note: '2 GB — fast, great for chat' },
+              { cmd: 'ollama pull qwen2.5-coder:7b', note: '4 GB — best for coding' },
+              { cmd: 'ollama pull deepseek-r1:8b',   note: '5 GB — reasoning model' },
+            ].map(({ cmd, note }) => (
+              <div key={cmd} className="flex items-center justify-between gap-2">
+                <code className="text-[10px] font-mono text-orange-800 dark:text-orange-200 bg-orange-100 dark:bg-orange-900/40 px-1.5 py-0.5 rounded">
+                  {cmd}
+                </code>
+                <span className="text-[10px] text-orange-500 dark:text-orange-400 whitespace-nowrap">{note}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
       {models.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-2">
@@ -325,10 +343,55 @@ function CustomProviderManager({
   )
 }
 
+// ── Nav items for the left sidebar ───────────────────────────────────────────
+type SettingsSection = 'general' | 'models' | 'prompt' | 'workspace' | 'mcp' | 'integrations' | 'features' | 'advanced'
+
+const NAV_ITEMS: { id: SettingsSection; icon: string; label: string }[] = [
+  { id: 'general',      icon: '⚙️',  label: 'General' },
+  { id: 'models',       icon: '🤖',  label: 'Models' },
+  { id: 'prompt',       icon: '💬',  label: 'System Prompt' },
+  { id: 'workspace',    icon: '📁',  label: 'Workspace' },
+  { id: 'mcp',          icon: '🔌',  label: 'MCP Servers' },
+  { id: 'integrations', icon: '🔗',  label: 'Integrations' },
+  { id: 'features',     icon: '🧩',  label: 'Features' },
+  { id: 'advanced',     icon: '🔧',  label: 'Advanced' },
+]
+
 export default function Settings({ settings, onSave, onCancel }: Props) {
   const [form, setForm] = useState<AppSettings>({ ...settings })
   const originalSettings = useRef<AppSettings>({ ...settings })
   const [hasChanges, setHasChanges] = useState(false)
+
+  // ── OpenAI dynamic model list ─────────────────────────────────────────────
+  const [openAIModels, setOpenAIModels]   = useState<string[]>([])
+  const [openAILoading, setOpenAILoading] = useState(false)
+  const openAIFetchedRef                  = useRef(false)
+
+  const fetchOpenAIModels = useCallback(async (apiKey: string) => {
+    if (!apiKey?.trim() || openAIFetchedRef.current) return
+    openAIFetchedRef.current = true
+    setOpenAILoading(true)
+    try {
+      const result = await window.api.getOpenAIModels(apiKey)
+      if (result.ok && result.models.length > 0) {
+        setOpenAIModels(result.models)
+      } else {
+        openAIFetchedRef.current = false  // allow retry
+      }
+    } catch {
+      openAIFetchedRef.current = false
+    } finally {
+      setOpenAILoading(false)
+    }
+  }, [])
+
+  // Auto-fetch when provider switches to openai — use API key if set, OAuth token as fallback
+  useEffect(() => {
+    if (form.provider === 'openai') {
+      const key = form.apiKey?.trim() || form.openaiOAuth?.accessToken
+      if (key) fetchOpenAIModels(key)
+    }
+  }, [form.provider, form.apiKey, form.openaiOAuth?.accessToken, fetchOpenAIModels])
 
   // ── OpenRouter dynamic model list ────────────────────────────────────────
   const [orModels, setOrModels]     = useState<Array<{ id: string; name: string; isFree: boolean }>>([])
@@ -365,6 +428,71 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
   const [saFileName, setSaFileName] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null)
   const [validationErrors, setValidationErrors] = useState<ValidationResult[]>([])
+  const [selectedSection, setSelectedSection] = useState<SettingsSection>('general')
+
+  // ── OpenAI OAuth state ───────────────────────────────────────────────────
+  const [oauthLoading,  setOauthLoading]  = useState(false)
+  const [oauthError,    setOauthError]    = useState<string | null>(null)
+
+  const handleOpenAILogin = async () => {
+    setOauthLoading(true); setOauthError(null)
+    try {
+      const result = await window.api.loginWithOpenAI()
+      if (result.ok && result.token) {
+        setForm(f => ({ ...f, openaiOAuth: result.token, apiKey: f.apiKey }))
+      } else {
+        setOauthError(result.error ?? 'Sign-in failed')
+      }
+    } catch (e) { setOauthError(String(e)) }
+    finally { setOauthLoading(false) }
+  }
+
+  const handleOpenAIRefresh = async () => {
+    const rt = form.openaiOAuth?.refreshToken
+    if (!rt) return
+    setOauthLoading(true); setOauthError(null)
+    try {
+      const result = await window.api.refreshOpenAIToken(rt)
+      if (result.ok && result.token) {
+        setForm(f => ({ ...f, openaiOAuth: { ...f.openaiOAuth!, ...result.token! } }))
+      } else {
+        const raw = result.error ?? 'Refresh failed'
+        // Detect permanent token invalidation (one-time-use refresh tokens).
+        // In this case the refresh token is dead — clear it so the UI switches
+        // to the "expired / sign in again" state cleanly.
+        const isTerminal = /already been used|invalid_request_error|invalid_grant|token.*expired/i.test(raw)
+        if (isTerminal) {
+          setForm(f => ({ ...f, openaiOAuth: f.openaiOAuth
+            ? { ...f.openaiOAuth, refreshToken: undefined, expiresAt: Date.now() - 1 }
+            : undefined
+          }))
+          setOauthError('Session expired — please sign in again.')
+        } else {
+          setOauthError(raw)
+        }
+      }
+    } catch (e) { setOauthError(String(e)) }
+    finally { setOauthLoading(false) }
+  }
+
+  const handleOpenAILogout = async () => {
+    await window.api.logoutOpenAI()
+    setForm(f => ({ ...f, openaiOAuth: undefined }))
+  }
+
+  const oauthToken    = form.openaiOAuth
+  const oauthValid    = oauthToken && (!oauthToken.expiresAt || oauthToken.expiresAt > Date.now() + 60_000)
+  const oauthExpired  = oauthToken && oauthToken.expiresAt && oauthToken.expiresAt <= Date.now() + 60_000
+
+  function formatOAuthExpiry(expiresAt?: number): string {
+    if (!expiresAt) return 'Non-expiring'
+    const diff  = expiresAt - Date.now()
+    if (diff <= 0) return 'Expired'
+    const mins  = Math.floor(diff / 60_000)
+    const hours = Math.floor(mins / 60)
+    if (hours > 0) return `Expires in ${hours}h ${mins % 60}m`
+    return `Expires in ${mins}m`
+  }
 
   const handleSave = () => {
     const results = validateSettings(form)
@@ -493,6 +621,7 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
   const isCustom     = form.provider === 'custom'
   const isNvidia     = form.provider === 'nvidia'
   const isOpenRouter = form.provider === 'openrouter'
+  const isOpenAI     = form.provider === 'openai'
   const needsApiKey  = !isGemini
 
   // Max output tokens per model (the slider ceiling)
@@ -558,9 +687,36 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-xl mx-auto px-6 py-8">
-          <h1 className="text-xl font-semibold mb-6 text-gray-900 dark:text-gray-100">Settings</h1>
+      <div className="flex-1 flex overflow-hidden">
+
+        {/* ── Left nav ───────────────────────────────────────────────── */}
+        <nav className="w-52 flex-shrink-0 bg-gray-100/80 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 overflow-y-auto py-2">
+          {NAV_ITEMS.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setSelectedSection(item.id)}
+              className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-sm transition-colors text-left
+                ${selectedSection === item.id
+                  ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 font-medium'
+                  : 'text-gray-600 dark:text-gray-400 hover:bg-white/60 dark:hover:bg-gray-800/60 hover:text-gray-900 dark:hover:text-gray-100'
+                }`}
+            >
+              <span className="text-base leading-none">{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* ── Right content panel ─────────────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-2xl mx-auto px-8 py-8">
+            <h2 className="text-lg font-semibold mb-6 text-gray-900 dark:text-gray-100">
+              {NAV_ITEMS.find(i => i.id === selectedSection)?.label ?? 'Settings'}
+            </h2>
+
+            {/* ── Models section ──────────────────────────────────────── */}
+            {selectedSection === 'models' && (<>
 
           {/* ── Provider dropdown ────────────────────────────────────── */}
           <section className="mb-5">
@@ -577,6 +733,52 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               ))}
             </select>
           </section>
+
+          {/* ── Local AI quick-setup card (shown when NOT on custom provider) ── */}
+          {form.provider !== 'custom' && (
+            <section className="mb-5">
+              <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 px-4 py-3">
+                <div className="flex items-start gap-3">
+                  <span className="text-2xl leading-none mt-0.5">🦙</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">
+                      Run AI locally for free — no API key
+                    </p>
+                    <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
+                      Ollama lets you run Llama 3, DeepSeek, Qwen-Coder and more on your machine. Your code never leaves your computer.
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {['llama3.2', 'qwen2.5-coder:7b', 'deepseek-r1:8b', 'mistral'].map(m => (
+                        <span key={m} className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-800/50 text-[11px] font-mono text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">
+                          {m}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2 mt-3">
+                      <button
+                        type="button"
+                        onClick={() => handleProviderChange('custom' as Provider)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
+                        </svg>
+                        Switch to Local AI
+                      </button>
+                      <a
+                        href="https://ollama.ai"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-emerald-600 dark:text-emerald-400 hover:underline"
+                      >
+                        Get Ollama →
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* ── Vertex AI / Gemini fields ─────────────────────────── */}
           {isGemini && (
@@ -700,12 +902,129 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
             </>
           )}
 
+          {/* ── Sign in with OpenAI (ChatGPT subscription) ──────────── */}
+          {form.provider === 'openai' && (
+            <section className="mb-5">
+              <label className={labelCls}>
+                Sign in with OpenAI
+                <span className="ml-2 text-xs font-normal px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400">
+                  Uses ChatGPT Plus / Pro subscription
+                </span>
+              </label>
+              <p className={`${hintCls} mb-3`}>
+                Log in through the browser — no API key needed. Chats draw from your
+                existing ChatGPT subscription quota (Plus / Pro / Team).
+                Uses the same public client as OpenAI's Codex CLI.
+              </p>
+
+              {oauthValid ? (
+                /* Connected state */
+                <div className="rounded-xl border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-2.5 h-2.5 rounded-full bg-green-500 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center flex-wrap gap-x-2 gap-y-1">
+                          {oauthToken?.name ?? 'Connected to OpenAI'}
+                          {oauthToken?.email && (
+                            <span className="text-xs font-normal text-gray-500 dark:text-gray-400">{oauthToken.email}</span>
+                          )}
+                          {oauthToken?.planType && oauthToken.planType !== 'free' && (
+                            <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-green-200 dark:bg-green-800 text-green-800 dark:text-green-200">
+                              {oauthToken.planType}
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                          {formatOAuthExpiry(oauthToken?.expiresAt)}
+                          {' · '}API key will be ignored while signed in
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {oauthToken?.refreshToken && (
+                        <button onClick={handleOpenAIRefresh} disabled={oauthLoading}
+                                className="text-xs text-blue-500 hover:text-blue-600 disabled:opacity-40 transition-colors">
+                          Refresh
+                        </button>
+                      )}
+                      <button onClick={handleOpenAILogout}
+                              className="text-xs px-3 py-1.5 rounded-lg border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors">
+                        Sign out
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : oauthExpired ? (
+                /* Expired state */
+                <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400 flex-shrink-0" />
+                      <p className="text-sm text-amber-700 dark:text-amber-400">Token expired — please sign in again.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      {oauthToken?.refreshToken && (
+                        <button onClick={handleOpenAIRefresh} disabled={oauthLoading}
+                                className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-40 transition-colors">
+                          {oauthLoading ? 'Refreshing…' : 'Refresh token'}
+                        </button>
+                      )}
+                      <button onClick={handleOpenAILogin} disabled={oauthLoading}
+                              className="text-xs px-3 py-1.5 rounded-lg bg-black dark:bg-white text-white dark:text-black hover:opacity-80 disabled:opacity-40 transition-colors">
+                        Sign in again
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* Not connected */
+                <button onClick={handleOpenAILogin} disabled={oauthLoading}
+                        className="w-full flex items-center justify-center gap-2.5 py-2.5 rounded-xl bg-black dark:bg-white text-white dark:text-black hover:opacity-80 disabled:opacity-50 transition-opacity font-medium text-sm">
+                  {oauthLoading ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Opening browser…
+                    </>
+                  ) : (
+                    <>
+                      {/* OpenAI logo mark */}
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M22.282 9.821a5.985 5.985 0 00-.516-4.91 6.046 6.046 0 00-6.51-2.9A6.065 6.065 0 004.981 4.18a5.985 5.985 0 00-3.998 2.9 6.046 6.046 0 00.743 7.097 5.98 5.98 0 00.51 4.911 6.051 6.051 0 006.515 2.9A5.985 5.985 0 0013.26 24a6.056 6.056 0 005.772-4.206 5.99 5.99 0 003.997-2.9 6.056 6.056 0 00-.747-7.073zM13.26 22.43a4.476 4.476 0 01-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 00.392-.681v-6.737l2.02 1.168a.071.071 0 01.038.052v5.583a4.504 4.504 0 01-4.494 4.494zM3.6 18.304a4.47 4.47 0 01-.535-3.014l.142.085 4.783 2.759a.771.771 0 00.78 0l5.843-3.369v2.332a.08.08 0 01-.033.062L9.74 19.95a4.5 4.5 0 01-6.14-1.646zM2.34 7.896a4.485 4.485 0 012.366-1.973V11.6a.766.766 0 00.388.676l5.815 3.355-2.02 1.168a.076.076 0 01-.071 0l-4.83-2.786A4.504 4.504 0 012.34 7.872zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 01.071 0l4.83 2.791a4.494 4.494 0 01-.676 8.105v-5.678a.79.79 0 00-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 00-.785 0L9.409 9.23V6.897a.066.066 0 01.028-.061l4.83-2.787a4.5 4.5 0 016.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 01-.038-.057V6.075a4.5 4.5 0 017.375-3.453l-.142.08L8.704 5.46a.795.795 0 00-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z"/>
+                      </svg>
+                      Sign in with OpenAI
+                    </>
+                  )}
+                </button>
+              )}
+
+              {oauthError && (
+                <p className="mt-2 text-xs text-red-500 dark:text-red-400">{oauthError}</p>
+              )}
+
+              <div className="mt-3 flex items-start gap-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+                <svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>
+                  When signed in, chats use the ChatGPT subscription endpoint. You can still fill in an API key below as a fallback for when the OAuth token expires.
+                </span>
+              </div>
+            </section>
+          )}
+
           {/* ── API Key (non-Gemini) ──────────────────────────────────── */}
           {needsApiKey && (
             <section className="mb-5">
               <label className={labelCls}>
                 API Key
                 <span className="text-gray-400 dark:text-gray-500 font-normal ml-2">— stored encrypted</span>
+                {form.provider === 'openai' && oauthValid && (
+                  <span className="ml-2 text-xs font-normal text-amber-500 dark:text-amber-400">(ignored while signed in)</span>
+                )}
               </label>
               <div className="relative">
                 <input
@@ -714,7 +1033,7 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
                   onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
                   placeholder={
                     form.provider === 'anthropic' ? 'sk-ant-…' :
-                    form.provider === 'openai'    ? 'sk-…' :
+                    form.provider === 'openai'    ? 'sk-… (optional when signed in above)' :
                     'API key (or blank for local)'
                   }
                   className={`${inputCls} pr-16`}
@@ -953,6 +1272,101 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
                 )}
                 <p className={hintCls}>Browse all models at <span className="text-blue-500">openrouter.ai/models</span></p>
               </>
+            ) : isOpenAI ? (
+              <>
+                {openAILoading && (
+                  <p className={hintCls + ' animate-pulse'}>Fetching live models from OpenAI…</p>
+                )}
+                {/* Always show the model picker — fallback list while loading or if fetch failed */}
+                {!openAILoading && (
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={
+                        openAIModels.length > 0
+                          ? (openAIModels.includes(form.model) ? form.model : '__custom__')
+                          : form.model
+                      }
+                      onChange={(e) => { if (e.target.value !== '__custom__') setForm({ ...form, model: e.target.value }) }}
+                      className={`${selectCls} flex-1`}
+                    >
+                      {openAIModels.length > 0 ? (
+                        <>
+                          {!openAIModels.includes(form.model) && form.model && (
+                            <option value="__custom__">{form.model}</option>
+                          )}
+                          {openAIModels.some(m => m.startsWith('gpt-5')) && (
+                            <optgroup label="── GPT-5 ────────────────────────">
+                              {openAIModels.filter(m => m.startsWith('gpt-5')).map(m => <option key={m} value={m}>{m}</option>)}
+                            </optgroup>
+                          )}
+                          <optgroup label="── GPT-4.1 ──────────────────────">
+                            {openAIModels.filter(m => m.startsWith('gpt-4.1')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── Reasoning (o-series) ─────────">
+                            {openAIModels.filter(m => /^o\d/.test(m)).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── GPT-4o ───────────────────────">
+                            {openAIModels.filter(m => m.startsWith('gpt-4o')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── Other ────────────────────────">
+                            {openAIModels.filter(m => !m.startsWith('gpt-5') && !m.startsWith('gpt-4.1') && !/^o\d/.test(m) && !m.startsWith('gpt-4o')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                        </>
+                      ) : (
+                        <>
+                          {!PROVIDER_MODELS['openai'].includes(form.model) && form.model && (
+                            <option value={form.model}>{form.model}</option>
+                          )}
+                          <optgroup label="── GPT-5 ────────────────────────">
+                            {PROVIDER_MODELS['openai'].filter(m => m.startsWith('gpt-5')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── GPT-4.1 ──────────────────────">
+                            {PROVIDER_MODELS['openai'].filter(m => m.startsWith('gpt-4.1')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── Reasoning (o-series) ─────────">
+                            {PROVIDER_MODELS['openai'].filter(m => /^o\d/.test(m)).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── GPT-4o ───────────────────────">
+                            {PROVIDER_MODELS['openai'].filter(m => m.startsWith('gpt-4o')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                          <optgroup label="── Legacy ───────────────────────">
+                            {PROVIDER_MODELS['openai'].filter(m => m.startsWith('gpt-4-') || m.startsWith('gpt-3')).map(m => <option key={m} value={m}>{m}</option>)}
+                          </optgroup>
+                        </>
+                      )}
+                    </select>
+                    {/* Refresh button — visible once live list is loaded */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const key = form.apiKey?.trim() || form.openaiOAuth?.accessToken
+                        if (!key) return
+                        openAIFetchedRef.current = false
+                        setOpenAIModels([])
+                        fetchOpenAIModels(key)
+                      }}
+                      title="Refresh model list from OpenAI"
+                      className="flex-shrink-0 p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-blue-500 hover:border-blue-400 dark:hover:border-blue-600 transition-colors"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+                <input
+                  type="text"
+                  value={form.model}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                  placeholder="or type any model ID (e.g. gpt-4.1, o4-mini)"
+                  className={`${inputCls} mt-2 text-xs`}
+                />
+                <p className={hintCls}>
+                  {openAIModels.length > 0
+                    ? <>{openAIModels.length} live models · <span className="text-blue-500">platform.openai.com/docs/models</span></>
+                    : <>(Live list auto-loads when an API key or OAuth session is present)</> }
+                </p>
+              </>
             ) : (
               <select
                 value={form.model}
@@ -967,6 +1381,31 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
             {isGemini && (
               <p className={hintCls}>Ensure the model is enabled in your GCP project's Vertex AI Model Garden.</p>
             )}
+          </section>
+
+          {/* ── Fast / Lightweight Model ─────────────────────────────── */}
+          <section className="mb-5">
+            <label className={labelCls}>
+              Fast Model
+              <span className="ml-2 text-xs font-normal text-gray-400 dark:text-gray-500">optional</span>
+            </label>
+            <p className={`${hintCls} mb-2`}>
+              When set, lightweight tasks like auto-title generation and inline editor completions use this
+              cheaper/faster model instead of the primary one — saving cost without sacrificing quality on
+              the tasks that matter.
+            </p>
+            <input
+              type="text"
+              value={form.fastModel ?? ''}
+              onChange={(e) => setForm({ ...form, fastModel: e.target.value || undefined })}
+              placeholder={
+                form.provider === 'anthropic' ? 'e.g. claude-haiku-4-5' :
+                form.provider === 'openai'    ? 'e.g. gpt-4o-mini' :
+                form.provider === 'gemini'    ? 'e.g. gemini-2.5-flash-preview-04-17' :
+                'Leave blank to use the primary model'
+              }
+              className={inputCls}
+            />
           </section>
 
           {/* ── Max Tokens ───────────────────────────────────────────── */}
@@ -1009,8 +1448,10 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               <span>200 (deep research)</span>
             </div>
           </section>
+            </>)}
 
-          {/* ── System Prompt ─────────────────────────────────────────── */}
+            {/* ── System Prompt section ───────────────────────────────── */}
+            {selectedSection === 'prompt' && (<>
           <section className="mb-6">
             <label className={labelCls}>System Prompt</label>
             <div className="flex gap-2 mb-3">
@@ -1073,9 +1514,11 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               </>
             )}
           </section>
+            </>)}
 
-          {/* ── Appearance ───────────────────────────────────────── */}
-          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            {/* ── General section ─────────────────────────────────────── */}
+            {selectedSection === 'general' && (<>
+          <section className="mb-6">
             <label className={labelCls}>Theme</label>
             <div className="flex gap-2 mt-1">
               {(['dark', 'light', 'system'] as const).map(t => (
@@ -1095,9 +1538,11 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
             </div>
             <p className={`${hintCls} mt-1.5`}>System follows your OS dark/light preference automatically.</p>
           </section>
+            </>)}
 
-          {/* ── Workspace Folder ──────────────────────────────────────── */}
-          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            {/* ── Workspace section ───────────────────────────────────── */}
+            {selectedSection === 'workspace' && (<>
+          <section className="mb-6">
             <label className={labelCls}>
               Workspace Folder
               <span className="ml-2 font-normal text-blue-500 dark:text-blue-400 text-xs">Agent tool use</span>
@@ -1315,9 +1760,23 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               )}
             </section>
           )}
+            </>)}
 
-          {/* ── Web Search (Brave API Key) ────────────────────────────── */}
-          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            {/* ── MCP Servers section ─────────────────────────────────── */}
+            {selectedSection === 'mcp' && (
+              <Suspense fallback={<div className="py-8 text-center text-sm text-gray-400">Loading…</div>}>
+                <McpServersPanel
+                  embedded
+                  settings={form}
+                  onSettingsUpdate={(s) => { setForm(s); setHasChanges(true) }}
+                  onClose={() => {}}
+                />
+              </Suspense>
+            )}
+
+            {/* ── Integrations section ────────────────────────────────── */}
+            {selectedSection === 'integrations' && (<>
+          <section className="mb-6">
             <label className={labelCls}>
               Brave Search API Key
               <span className="ml-2 font-normal text-orange-500 dark:text-orange-400 text-xs">Web search tool</span>
@@ -1360,9 +1819,11 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               </p>
             )}
           </section>
+            </>)}
 
-          {/* ── Generation Parameters ─────────────────────────────── */}
-          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            {/* ── Advanced section ────────────────────────────────────── */}
+            {selectedSection === 'advanced' && (<>
+          <section className="mb-6">
             <label className={labelCls}>Generation Parameters</label>
             <p className={`${hintCls} mb-4`}>
               Control randomness and output diversity. Leave at default for most tasks.
@@ -1615,9 +2076,10 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               </div>
             )}
           </section>
+            </>)}
 
-          {/* ── GitHub Personal Access Token ─────────────────────────── */}
-          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            {selectedSection === 'integrations' && (<>
+          <section className="mb-6">
             <label className={labelCls}>
               GitHub Personal Access Token
               <span className="ml-2 font-normal text-gray-500 dark:text-gray-400 text-xs">Optional</span>
@@ -1773,6 +2235,51 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
               </p>
             </div>
           </section>
+            </>)}
+
+            {/* ── Features section ────────────────────────────────────── */}
+            {selectedSection === 'features' && (<>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-6">
+              Enable or disable optional panel features. Enabled panels appear in the sidebar. Restart is not required.
+            </p>
+            {(
+              [
+                { key: 'dockerManager',   icon: '🐳', label: 'Docker Manager',     desc: 'Manage containers, images and volumes. Requires Docker to be installed.' },
+                { key: 'httpBuilder',     icon: '🌐', label: 'HTTP Builder',        desc: 'Postman-style REST client — build and send HTTP requests directly from the app.' },
+                { key: 'dependencyAudit', icon: '🔍', label: 'Dependency Audit',    desc: 'Run npm/yarn/pip/cargo audit and see vulnerabilities in your project.' },
+                { key: 'testRunner',      icon: '🧪', label: 'Test Runner',         desc: 'Run your test suite and view pass/fail results inline.' },
+                { key: 'regexTester',     icon: '🔣', label: 'Regex Tester',        desc: 'Test regular expressions against sample input with live highlighting.' },
+                { key: 'dbBrowser',       icon: '🗄️',  label: 'Database Browser',   desc: 'Connect to SQLite or PostgreSQL and run queries.' },
+                { key: 'embeddedBrowser', icon: '🔗', label: 'Embedded Browser',    desc: 'Open provider dashboards (Supabase, Vercel, Cloudflare…) in a built-in browser tab.' },
+              ] as const
+            ).map(feat => (
+              <div
+                key={feat.key}
+                className="flex items-start justify-between gap-4 mb-5 pb-5 border-b border-gray-200 dark:border-gray-800 last:border-0 last:mb-0 last:pb-0"
+              >
+                <div className="flex items-start gap-3 flex-1 min-w-0">
+                  <span className="text-2xl leading-none mt-0.5">{feat.icon}</span>
+                  <div>
+                    <p className="text-sm font-medium text-gray-800 dark:text-gray-200">{feat.label}</p>
+                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{feat.desc}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({
+                    ...f,
+                    features: { ...f.features, [feat.key]: !(f.features?.[feat.key]) }
+                  }))}
+                  className={`flex-shrink-0 w-11 h-6 rounded-full transition-colors relative mt-0.5
+                    ${form.features?.[feat.key] ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}`}
+                >
+                  <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform
+                    ${form.features?.[feat.key] ? 'translate-x-5' : 'translate-x-0.5'}`}
+                  />
+                </button>
+              </div>
+            ))}
+            </>)}
 
           {/* ── Test result ───────────────────────────────────────────── */}
           {testResult && (
@@ -1858,6 +2365,7 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
             </button>
             </div>
           </div>
+        </div>
         </div>
       </div>
     </div>

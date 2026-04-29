@@ -62,6 +62,7 @@ interface GitHubCreateIssueParams {
 interface Props {
   workspacePath: string
   onClose: () => void
+  onImplementIssue?: (issue: GitHubIssue) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +302,7 @@ function PRsTab({ owner, repo, token }: { owner: string; repo: string; token: st
 // Issues tab
 // ---------------------------------------------------------------------------
 
-function IssuesTab({ owner, repo, token }: { owner: string; repo: string; token: string }) {
+function IssuesTab({ owner, repo, token, onImplementIssue }: { owner: string; repo: string; token: string; onImplementIssue?: (issue: GitHubIssue) => void }) {
   const [issues, setIssues] = useState<GitHubIssue[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -368,15 +369,30 @@ function IssuesTab({ owner, repo, token }: { owner: string; repo: string; token:
                 )}
               </div>
             </div>
-            <a
-              href={issue.url}
-              target="_blank"
-              rel="noreferrer"
-              className="flex-shrink-0 text-xs text-blue-500 hover:text-blue-400 font-medium whitespace-nowrap"
-            >
-              Open
-              <ExternalLinkIcon />
-            </a>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              {onImplementIssue && issue.state === 'open' && (
+                <button
+                  onClick={() => onImplementIssue(issue)}
+                  title="Fix this issue with AI Agent"
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 text-amber-600 dark:text-amber-400 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors whitespace-nowrap"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round"
+                      d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1 1 .3 2.7-1.1 2.7H3.9c-1.4 0-2.1-1.7-1.1-2.7L4.6 15.3" />
+                  </svg>
+                  Fix with Agent
+                </button>
+              )}
+              <a
+                href={issue.url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex-shrink-0 text-xs text-blue-500 hover:text-blue-400 font-medium whitespace-nowrap"
+              >
+                Open
+                <ExternalLinkIcon />
+              </a>
+            </div>
           </div>
         </div>
       ))}
@@ -591,7 +607,7 @@ function CreateIssueTab({ owner, repo, token }: { owner: string; repo: string; t
 // Main panel
 // ---------------------------------------------------------------------------
 
-export default function GitHubPanel({ workspacePath, onClose }: Props) {
+export default function GitHubPanel({ workspacePath, onClose, onImplementIssue }: Props) {
   const [tab, setTab] = useState<Tab>('prs')
   const [token, setToken] = useState<string>(() => localStorage.getItem('github-pat') ?? '')
   const [owner, setOwner] = useState('')
@@ -730,7 +746,7 @@ export default function GitHubPanel({ workspacePath, onClose }: Props) {
                 <PRsTab owner={owner} repo={repo} token={token} />
               )}
               {tab === 'issues' && token && (
-                <IssuesTab owner={owner} repo={repo} token={token} />
+                <IssuesTab owner={owner} repo={repo} token={token} onImplementIssue={onImplementIssue} />
               )}
               {tab === 'create-pr' && (
                 <CreatePRTab owner={owner} repo={repo} token={token} defaultBranch={defaultBranch} />

@@ -12,7 +12,17 @@ const settingsStore = new Store<{ settings: AppSettings }>({
 })
 
 export function getSettings(): AppSettings {
-  return settingsStore.get('settings', DEFAULT_SETTINGS)
+  const stored = settingsStore.get('settings', DEFAULT_SETTINGS)
+  // Spread defaults first so any new fields added to DEFAULT_SETTINGS are
+  // automatically available to existing installs.  Then overlay stored values
+  // so the user's choices are preserved.  Explicitly restore systemPrompt when
+  // it is blank — the stored value may be '' from older versions where the
+  // good default prompt hadn't been written yet.
+  return {
+    ...DEFAULT_SETTINGS,
+    ...stored,
+    systemPrompt: stored.systemPrompt?.trim() || DEFAULT_SETTINGS.systemPrompt,
+  }
 }
 
 export function saveSettings(settings: AppSettings): void {

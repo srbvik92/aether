@@ -3,7 +3,7 @@ import { Conversation } from '../../../shared/types'
 
 interface Props {
   conversations: Conversation[]
-  onSelect:      (convId: string) => void
+  onSelect:      (convId: string, msgId: string) => void
   onClose:       () => void
 }
 
@@ -105,7 +105,7 @@ export default function ConversationSearch({ conversations, onSelect, onClose }:
 
   const commit = useCallback((idx: number) => {
     const r = results[idx]
-    if (r) { onSelect(r.convId); onClose() }
+    if (r) { onSelect(r.convId, r.msgId); onClose() }
   }, [results, onSelect, onClose])
 
   // Keyboard navigation

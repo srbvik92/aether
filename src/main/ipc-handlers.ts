@@ -1,12 +1,13 @@
-import { ipcMain, BrowserWindow, dialog, app, net } from 'electron'
-import { execSync } from 'child_process'
-import { writeFileSync, readdirSync, statSync, readFileSync, existsSync, mkdirSync } from 'fs'
+import { ipcMain, BrowserWindow, dialog, app, net, clipboard } from 'electron'
+import { execSync, spawn, ChildProcess } from 'child_process'
+import { writeFileSync, readdirSync, statSync, readFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync } from 'fs'
 import { join, relative, extname } from 'path'
 import {
   IPC,
   AppSettings,
   Conversation,
   ChatSendPayload,
+  AuditResult,
   StreamChunkPayload,
   StreamDonePayload,
   StreamErrorPayload,
@@ -20,10 +21,12 @@ import {
   SnapshotInfo,
   DiffRequestPayload,
   DiffResponsePayload,
+  DiffAttachPayload,
   GitStatusSummary,
   CmdApprovalPayload,
   AgentPreset,
   McpServerConfig,
+  McpOAuthConfig,
   JiraProject,
   JiraIssue,
   LinearIssue
@@ -39,12 +42,15 @@ import { AIClient } from './api-client'
 import { trackMessage, trackToolCall, trackError } from './telemetry'
 import { runAnthropicAgentLoop } from './agent-loop'
 import { runOpenAIAgentLoop } from './openai-agent-loop'
+import { runOpenAIResponsesLoop, hasValidRemoteMcp } from './openai-responses-loop'
+import { runOpenAICodexLoop } from './openai-codex-loop'
 import { runGeminiAgentLoop } from './gemini-agent-loop'
+import { isOpenAITokenValid } from './openai-auth'
 import { withRetry } from './api-retry'
 import { compressToContextWindow } from './context-manager'
 import { log } from './logger'
 import { buildWorkspaceSummary, invalidateCache } from './workspace-indexer'
-import { DiffApprovalFn, setGlobalMemoryPath, setDisabledTools, setCmdApprovalFn, setTrustedCommands, isDangerousCommand, killRunningCommand } from './tools'
+import { DiffApprovalFn, setGlobalMemoryPath, setDisabledTools, setCmdApprovalFn, setTrustedCommands, isDangerousCommand, killRunningCommand, fetchPageContent } from './tools'
 import { loadProjectConfig } from './project-config'
 import { startSnapshot, backupFileForSnapshot, finalizeSnapshot, restoreSnapshot, toRelativePath } from './checkpoint'
 import { getGitStatus, getGitDiff, isGitRepo } from './git'
@@ -66,7 +72,7 @@ import {
 const activeStreams = new Map<string, { abort: AbortController }>()
 
 // ── Pending diff approvals (paused agent waiting for user) ────────────────────
-const pendingDiffApprovals = new Map<string, (approved: boolean) => void>()
+const pendingDiffApprovals = new Map<string, { resolve: (v: string | false) => void; after: string }>()
 
 let diffCounter = 0
 function genDiffId() { return `diff-${++diffCounter}-${Date.now()}` }
@@ -84,18 +90,77 @@ function buildCmdApprovalFn(mainWindow: BrowserWindow) {
       pendingCmdApprovals.set(id, resolve)
       const payload: CmdApprovalPayload = { id, command, workspace, isDangerous, callId }
       mainWindow.webContents.send(IPC.CMD_APPROVAL_REQUEST, payload)
+
+      // Desktop notification when the window is not focused
+      if (!mainWindow.isFocused()) {
+        try {
+          const { Notification: N } = require('electron') as typeof import('electron')
+          if (N.isSupported()) {
+            const shortCmd = command.length > 70 ? command.slice(0, 67) + '…' : command
+            const notif = new N({
+              title: isDangerous ? '⚠️ Dangerous Command Needs Approval' : 'Command Needs Approval',
+              body:  shortCmd,
+              // macOS only — action buttons
+              actions:         [{ type: 'button', text: 'Approve' }, { type: 'button', text: 'Deny' }],
+              closeButtonText: 'Deny',
+            })
+            // macOS: user clicked an action button (index 0 = Approve, 1 = Deny)
+            notif.on('action', (_e: Electron.Event, index: number) => {
+              const resolver = pendingCmdApprovals.get(id)
+              if (resolver) { pendingCmdApprovals.delete(id); resolver(index === 0) }
+            })
+            // All platforms: clicking the notification body focuses the window
+            notif.on('click', () => { mainWindow.show(); mainWindow.focus() })
+            notif.show()
+          }
+        } catch { /* non-fatal */ }
+      }
     })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function buildDiffApprovalFn(mainWindow: BrowserWindow): DiffApprovalFn {
+function buildDiffApprovalFn(mainWindow: BrowserWindow, getCurrentCallId?: () => string | null): DiffApprovalFn {
   return (path, before, after, isNew) =>
-    new Promise<boolean>((resolve) => {
+    new Promise<string | false>((resolve) => {
       const id = genDiffId()
-      pendingDiffApprovals.set(id, resolve)
+      pendingDiffApprovals.set(id, { resolve, after })
       const payload: DiffRequestPayload = { id, path, before, after, isNew }
+
+      // If we have a callId, send DIFF_ATTACH so it appears inline in the tool card
+      const callId = getCurrentCallId?.()
+      if (callId) {
+        mainWindow.webContents.send(IPC.DIFF_ATTACH, { diffId: id, callId, payload } as DiffAttachPayload)
+      }
+
+      // Always also send DIFF_REQUEST so App.tsx can handle Accept All and modal fallback
       mainWindow.webContents.send(IPC.DIFF_REQUEST, payload)
+
+      // Desktop notification when the window is not focused
+      if (!mainWindow.isFocused()) {
+        try {
+          const { Notification: N } = require('electron') as typeof import('electron')
+          if (N.isSupported()) {
+            const fileName = path.split(/[\\/]/).pop() ?? path
+            const actionLabel = isNew ? 'Create' : 'Edit'
+            const notif = new N({
+              title: `AI wants to ${actionLabel} a file`,
+              body:  fileName,
+              // macOS only — action buttons
+              actions:         [{ type: 'button', text: 'Approve' }, { type: 'button', text: 'Deny' }],
+              closeButtonText: 'Deny',
+            })
+            // macOS: user clicked an action button
+            notif.on('action', (_e: Electron.Event, index: number) => {
+              const entry = pendingDiffApprovals.get(id)
+              if (entry) { pendingDiffApprovals.delete(id); entry.resolve(index === 0 ? entry.after : false) }
+            })
+            // All platforms: clicking the notification body focuses the window
+            notif.on('click', () => { mainWindow.show(); mainWindow.focus() })
+            notif.show()
+          }
+        } catch { /* non-fatal */ }
+      }
     })
 }
 
@@ -310,6 +375,11 @@ function injectWorkspaceContext(settings: AppSettings): AppSettings {
 
 export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
+  // Clear badge + overlay icon whenever the user focuses the window
+  mainWindow.on('focus', () => {
+    try { app.setBadgeCount(0) } catch { /* not supported on all platforms */ }
+  })
+
   // Set the global memory path once — tools.ts reads it for remember_globally
   setGlobalMemoryPath(join(app.getPath('userData'), 'global-memory.md'))
 
@@ -433,9 +503,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       log.info('ipc', 'Context compressed', { conversationId, originalCount: messages.length, trimmedCount: trimmedMessages.length })
     }
 
+    // Track the currently-executing tool call ID so DIFF_ATTACH can link to the card
+    let currentCallId: string | null = null
+
     // Only show diff approval when the setting is enabled (default: true)
     const onDiffRequest = rawSettings.requireEditApproval !== false
-      ? buildDiffApprovalFn(mainWindow)
+      ? buildDiffApprovalFn(mainWindow, () => currentCallId)
       : undefined
 
     // Track all files written during this turn for the session change summary
@@ -453,6 +526,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
     const onToolCallStart = (callId: string, name: string, input: Record<string, unknown>) => {
       if (abort.signal.aborted) return
+      currentCallId = callId
 
       // ── Lazily create a snapshot before the first file write ──────────────
       // onToolCallStart is called synchronously before executeTool, so the
@@ -586,12 +660,41 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
           onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
         }})
       } else if (rawSettings.provider === 'openai' || rawSettings.provider === 'custom' || rawSettings.provider === 'nvidia' || rawSettings.provider === 'openrouter') {
-        await withRetry(() => runOpenAIAgentLoop(trimmedMessages, settingsWithWorkspace, {
-          onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-          abortSignal: abort.signal
-        }), { maxRetries: 2, onRetry: (attempt, delay) => {
-          onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
-        }})
+        const remoteMcpServers = (rawSettings.mcpServers ?? []).filter(s => s.serverType === 'remote' && s.enabled)
+        const oauthToken       = rawSettings.openaiOAuth
+        const hasOAuth         = rawSettings.provider === 'openai' && isOpenAITokenValid(oauthToken)
+        const useResponsesApi  = rawSettings.provider === 'openai' && hasValidRemoteMcp(rawSettings.mcpServers ?? [])
+
+        if (hasOAuth && oauthToken) {
+          // ── ChatGPT subscription path via OAuth ──────────────────────────
+          // Uses chatgpt.com/backend-api/codex/responses — draws from Plus/Pro quota
+          await withRetry(() => runOpenAICodexLoop(
+            trimmedMessages,
+            settingsWithWorkspace,
+            oauthToken.accessToken,
+            oauthToken.accountId,
+            conversationId,
+            { onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest, abortSignal: abort.signal }
+          ), { maxRetries: 2, onRetry: (attempt, delay) => {
+            onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
+          }})
+        } else if (useResponsesApi) {
+          // ── OpenAI Responses API with remote MCP servers ─────────────────
+          await withRetry(() => runOpenAIResponsesLoop(trimmedMessages, settingsWithWorkspace, remoteMcpServers, {
+            onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
+            abortSignal: abort.signal
+          }), { maxRetries: 2, onRetry: (attempt, delay) => {
+            onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
+          }})
+        } else {
+          // ── Standard Chat Completions with API key ────────────────────────
+          await withRetry(() => runOpenAIAgentLoop(trimmedMessages, settingsWithWorkspace, {
+            onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
+            abortSignal: abort.signal
+          }), { maxRetries: 2, onRetry: (attempt, delay) => {
+            onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
+          }})
+        }
       } else if (rawSettings.provider === 'gemini') {
         await withRetry(() => runGeminiAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
@@ -645,12 +748,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
         if (chatMode === 'agent' && !mainWindow.isFocused()) {
           try {
             app.setBadgeCount(1)
-            const { Notification: NativeNotification } = require('electron') as typeof import('electron')
-            if (NativeNotification.isSupported()) {
-              new NativeNotification({
-                title: 'Agent Update',
-                body:  'Agent completed a step. Check the app for progress.'
-              }).show()
+            const { Notification: N } = require('electron') as typeof import('electron')
+            if (N.isSupported()) {
+              const notif = new N({
+                title: '✅ Agent Task Complete',
+                body:  'The agent has finished. Click to view results.',
+              })
+              notif.on('click', () => {
+                mainWindow.show()
+                mainWindow.focus()
+                try { app.setBadgeCount(0) } catch { /* non-fatal */ }
+              })
+              notif.show()
             }
           } catch { /* badge/notification errors are non-fatal */ }
         }
@@ -721,10 +830,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   // ── Diff approval ─────────────────────────────────────────────────────────
 
   ipcMain.handle(IPC.DIFF_RESPONSE, (_event, payload: DiffResponsePayload) => {
-    const resolver = pendingDiffApprovals.get(payload.id)
-    if (resolver) {
-      resolver(payload.approved)
+    const entry = pendingDiffApprovals.get(payload.id)
+    if (entry) {
       pendingDiffApprovals.delete(payload.id)
+      entry.resolve(payload.approved ? (payload.content ?? entry.after) : false)
     }
     return { ok: true }
   })
@@ -748,13 +857,26 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       defaultPath: `${defaultName}.${format}`,
       filters: format === 'md'
         ? [{ name: 'Markdown', extensions: ['md'] }, { name: 'All Files', extensions: ['*'] }]
-        : [{ name: 'Text',     extensions: ['txt'] }, { name: 'All Files', extensions: ['*'] }]
+        : format === 'json'
+          ? [{ name: 'JSON',   extensions: ['json'] }, { name: 'All Files', extensions: ['*'] }]
+          : [{ name: 'Text',   extensions: ['txt'] }, { name: 'All Files', extensions: ['*'] }]
     })
     if (!result.canceled && result.filePath) {
       writeFileSync(result.filePath, content, 'utf-8')
       return { ok: true }
     }
     return { ok: false }
+  })
+
+  // ── Clipboard image ──────────────────────────────────────────────────────
+  // The renderer cannot reliably read clipboard File objects — use the Electron
+  // native clipboard module in the main process instead.
+  ipcMain.handle(IPC.CLIPBOARD_READ_IMAGE, () => {
+    const img = clipboard.readImage()
+    if (img.isEmpty()) return null
+    const png    = img.toPNG()
+    const base64 = png.toString('base64')
+    return { dataUrl: `data:image/png;base64,${base64}`, base64, size: png.length }
   })
 
   // ── Git status (for UI status bar) ───────────────────────────────────────
@@ -777,6 +899,71 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
   })
 
+  // ── Git commit helpers ────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.GIT_STAGED_DIFF, (_event, workspacePath: string) => {
+    try {
+      const diff = getGitDiff(workspacePath, { staged: true })
+      return { ok: true, diff }
+    } catch (e) {
+      return { ok: false, diff: '', error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.GIT_STAGE_ALL, (_event, workspacePath: string) => {
+    try {
+      const { execSync: exec } = require('child_process') as typeof import('child_process')
+      exec('git add -A', { cwd: workspacePath, timeout: 10_000 })
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.GIT_GENERATE_MSG, async (_event, workspacePath: string, settings: AppSettings) => {
+    try {
+      const diff = getGitDiff(workspacePath, { staged: true })
+      if (!diff || diff === 'No staged changes.') {
+        return { ok: false, error: 'No staged changes to generate a message from.' }
+      }
+
+      const prompt =
+        `Write a concise git commit message for the following staged diff.\n` +
+        `Rules:\n` +
+        `- Use imperative mood ("Add feature" not "Added feature")\n` +
+        `- First line ≤ 72 characters — the summary\n` +
+        `- If needed, add a blank line then 1-3 bullet points explaining WHY\n` +
+        `- No generic messages like "Update code" or "Fix bug"\n` +
+        `- Output ONLY the commit message, nothing else\n\n` +
+        `Diff:\n\`\`\`diff\n${diff.slice(0, 12_000)}\n\`\`\``
+
+      const genSettings: AppSettings = {
+        ...settings,
+        model:     settings.fastModel || settings.model,
+        maxTokens: 200
+      }
+      const client = new AIClient(genSettings)
+      let message = ''
+      for await (const chunk of client.streamMessage([{ role: 'user', content: prompt }])) {
+        message += chunk
+        if (message.length > 800) break
+      }
+      return { ok: true, message: message.trim() }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.GIT_DO_COMMIT, (_event, workspacePath: string, message: string) => {
+    try {
+      const { gitCommit } = require('./git') as typeof import('./git')
+      const result = gitCommit(workspacePath, message)
+      return result
+    } catch (e) {
+      return { ok: false, output: String(e) }
+    }
+  })
+
   // ── Folder picker ─────────────────────────────────────────────────────────
 
   ipcMain.handle(IPC.PICK_FOLDER, async () => {
@@ -788,6 +975,69 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       return { path: result.filePaths[0] }
     }
     return { path: null }
+  })
+
+  // ── URL pre-fetch ─────────────────────────────────────────────────────────
+  // Called by the renderer before sending a message that contains URLs.
+  // Uses net.fetch (bypasses CORS) and returns cleaned readable text.
+
+  ipcMain.handle(IPC.URL_FETCH, async (_e, url: string) => {
+    try {
+      if (!url?.trim()) return { ok: false, content: '', error: 'No URL provided' }
+      new URL(url)  // validate — throws on malformed URL
+      const content = await fetchPageContent(url)
+      if (!content) return { ok: false, content: '', error: 'Could not fetch page (site may block automated requests)' }
+      return { ok: true, content }
+    } catch (err) {
+      return { ok: false, content: '', error: String(err) }
+    }
+  })
+
+  // ── OpenAI model list ─────────────────────────────────────────────────────
+  // Fetches available chat models from the OpenAI API. Requires an API key.
+  // Filters out non-chat models (embeddings, TTS, Whisper, DALL-E, etc.).
+
+  ipcMain.handle(IPC.OPENAI_GET_MODELS, async (_e, apiKey: string) => {
+    try {
+      if (!apiKey?.trim()) throw new Error('No API key provided')
+
+      const res = await net.fetch('https://api.openai.com/v1/models', {
+        headers: { Authorization: `Bearer ${apiKey.trim()}` }
+      })
+      if (!res.ok) {
+        const body = await res.text()
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`)
+      }
+
+      const json = await res.json() as { data: Array<{ id: string; owned_by: string }> }
+      if (!Array.isArray(json.data)) throw new Error('Unexpected response shape')
+
+      // Prefixes that identify chat-capable models
+      const CHAT_PREFIXES = ['gpt-', 'o1', 'o3', 'o4', 'chatgpt-']
+      // Suffixes/substrings to exclude (audio, image, embedding models)
+      const EXCLUDE = ['whisper', 'tts', 'dall-e', 'embedding', 'davinci', 'babbage',
+                       'curie', 'ada', 'moderation', 'realtime', 'audio', 'search']
+
+      const models = json.data
+        .filter(m => {
+          const id = m.id.toLowerCase()
+          const ok = CHAT_PREFIXES.some(p => id.startsWith(p))
+          const bad = EXCLUDE.some(x => id.includes(x))
+          return ok && !bad
+        })
+        .map(m => m.id)
+        .sort((a, b) => {
+          // Bring newest/flagship first: gpt-4o before gpt-4, o3 before o1, etc.
+          // Simple: sort by id descending so higher version numbers appear first
+          return b.localeCompare(a, undefined, { numeric: true })
+        })
+
+      log.info('openai', `Fetched ${models.length} chat models`)
+      return { ok: true, models }
+    } catch (err) {
+      log.warn('openai', 'Failed to fetch models', String(err))
+      return { ok: false, models: [] as string[], error: String(err) }
+    }
   })
 
   // ── OpenRouter model list ─────────────────────────────────────────────────
@@ -1071,12 +1321,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     const prompt =
       `Generate a short title (3-6 words, no quotes, no trailing punctuation) ` +
       `for a chat conversation that starts with:\n"${firstUserMsg.slice(0, 400)}"\n\nRespond with ONLY the title.`
+    // Use the fast/lightweight model when configured — auto-title is a trivial task
+    const titleModel = settings.fastModel || settings.model
     try {
       if (settings.provider === 'anthropic') {
         const { default: Anthropic } = await import('@anthropic-ai/sdk')
         const client = new Anthropic({ apiKey: settings.apiKey, baseURL: settings.baseUrl || undefined })
         const resp   = await client.messages.create({
-          model: settings.model, max_tokens: 25,
+          model: titleModel, max_tokens: 25,
           messages: [{ role: 'user', content: prompt }]
         })
         const raw   = (resp.content[0] as { type: string; text?: string }).text ?? ''
@@ -1087,7 +1339,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
         const { default: OpenAI } = await import('openai')
         const client = new OpenAI({ apiKey: settings.apiKey, baseURL: settings.baseUrl || undefined })
         const resp   = await client.chat.completions.create({
-          model: settings.model, max_tokens: 25,
+          model: titleModel, max_tokens: 25,
           messages: [{ role: 'user', content: prompt }]
         })
         const raw   = resp.choices[0]?.message?.content ?? ''
@@ -1206,6 +1458,56 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       const dir = join(resolvedFull, '..')
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
       writeFileSync(resolvedFull, content, 'utf-8')
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // Delete a file (or empty directory) in the workspace
+  ipcMain.handle(IPC.WORKSPACE_DELETE_FILE, (_event, workspacePath: string, relativePath: string): { ok: boolean; error?: string } => {
+    if (!workspacePath || !relativePath) return { ok: false, error: 'Missing parameters' }
+    try {
+      const fullPath = join(workspacePath, relativePath)
+      if (!join(fullPath).startsWith(join(workspacePath))) return { ok: false, error: 'Path is outside workspace' }
+      if (!existsSync(fullPath)) return { ok: false, error: 'Path not found' }
+      const stat = statSync(fullPath)
+      if (stat.isDirectory()) {
+        rmSync(fullPath, { recursive: true, force: true })
+      } else {
+        unlinkSync(fullPath)
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // Rename / move a file or directory within the workspace
+  ipcMain.handle(IPC.WORKSPACE_RENAME_FILE, (_event, workspacePath: string, oldRelPath: string, newRelPath: string): { ok: boolean; error?: string } => {
+    if (!workspacePath || !oldRelPath || !newRelPath) return { ok: false, error: 'Missing parameters' }
+    try {
+      const base    = join(workspacePath)
+      const oldFull = join(workspacePath, oldRelPath)
+      const newFull = join(workspacePath, newRelPath)
+      if (!join(oldFull).startsWith(base) || !join(newFull).startsWith(base)) return { ok: false, error: 'Path is outside workspace' }
+      if (!existsSync(oldFull)) return { ok: false, error: 'Source not found' }
+      const dir = join(newFull, '..')
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      renameSync(oldFull, newFull)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // Create a new folder in the workspace
+  ipcMain.handle(IPC.WORKSPACE_NEW_FOLDER, (_event, workspacePath: string, relativePath: string): { ok: boolean; error?: string } => {
+    if (!workspacePath || !relativePath) return { ok: false, error: 'Missing parameters' }
+    try {
+      const fullPath = join(workspacePath, relativePath)
+      if (!join(fullPath).startsWith(join(workspacePath))) return { ok: false, error: 'Path is outside workspace' }
+      mkdirSync(fullPath, { recursive: true })
       return { ok: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -1535,6 +1837,75 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       ...c,
       status: getMcpServerStatus(c.id)
     }))
+  })
+
+  // ── MCP OAuth ─────────────────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.MCP_OAUTH_START, async (_event, oauthConfig: McpOAuthConfig) => {
+    try {
+      const { startOAuthFlow } = await import('./mcp-oauth')
+      const tokenSet = await startOAuthFlow(oauthConfig)
+      log.info('ipc', 'MCP OAuth flow completed', { clientId: oauthConfig.clientId })
+      return { ok: true, token: tokenSet }
+    } catch (e) {
+      log.error('ipc', 'MCP OAuth flow failed', { error: String(e) })
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.MCP_OAUTH_REFRESH, async (_event, opts: {
+    tokenUrl:      string
+    clientId:      string
+    clientSecret?: string
+    refreshToken:  string
+  }) => {
+    try {
+      const { refreshOAuthToken } = await import('./mcp-oauth')
+      const tokenSet = await refreshOAuthToken(opts)
+      log.info('ipc', 'MCP OAuth token refreshed', { clientId: opts.clientId })
+      return { ok: true, token: tokenSet }
+    } catch (e) {
+      log.error('ipc', 'MCP OAuth token refresh failed', { error: String(e) })
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.MCP_OAUTH_REVOKE, async (_event, _clientId: string) => {
+    // Token revocation is storage-only — we just return ok.
+    // The renderer is responsible for deleting the stored token from settings.
+    return { ok: true }
+  })
+
+  // ── OpenAI OAuth (Sign in with OpenAI / ChatGPT subscription) ────────────────
+
+  ipcMain.handle(IPC.OPENAI_OAUTH_LOGIN, async () => {
+    try {
+      const { startOpenAILogin } = await import('./openai-auth')
+      const token = await startOpenAILogin()
+      log.info('ipc', 'OpenAI OAuth login complete')
+      return { ok: true, token }
+    } catch (e) {
+      log.error('ipc', 'OpenAI OAuth login failed', { error: String(e) })
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.OPENAI_OAUTH_REFRESH, async (_event, refreshToken: string) => {
+    try {
+      const { refreshOpenAIToken } = await import('./openai-auth')
+      const token = await refreshOpenAIToken(refreshToken)
+      log.info('ipc', 'OpenAI OAuth token refreshed')
+      return { ok: true, token }
+    } catch (e) {
+      log.error('ipc', 'OpenAI OAuth refresh failed', { error: String(e) })
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.OPENAI_OAUTH_LOGOUT, async () => {
+    // No server-side revocation needed — just acknowledge.
+    // Renderer removes the token from settings.
+    return { ok: true }
   })
 
   // ── Jira integration ─────────────────────────────────────────────────────────
@@ -2014,4 +2385,448 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       return { ok: false, entries: [], error: String(err) }
     }
   })
+
+  // ── Test runner ───────────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.TEST_RUN, async (_e, command: string, workspace: string, framework: string) => {
+    const { runTests, detectFrameworks } = await import('./test-runner')
+    try {
+      runTests(command, workspace, framework as import('./test-runner').TestFramework,
+        (chunk: string) => {
+          mainWindow.webContents.send(IPC.TEST_CHUNK, chunk)
+        },
+        (result: import('./test-runner').TestRunResult) => {
+          mainWindow.webContents.send(IPC.TEST_DONE, result)
+        }
+      )
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.TEST_ABORT, async () => {
+    const { abortTest } = await import('./test-runner')
+    abortTest()
+    return { ok: true }
+  })
+
+  ipcMain.handle(IPC.TEST_WATCH_TOGGLE, async (_e, enabled: boolean, workspace: string) => {
+    const { startTestWatcher, stopTestWatcher } = await import('./test-runner')
+    if (enabled) {
+      startTestWatcher(workspace, (changedFile: string) => {
+        mainWindow.webContents.send(IPC.TEST_WATCH_FIRED, changedFile)
+      })
+    } else {
+      stopTestWatcher()
+    }
+    return { ok: true }
+  })
+
+  // Detect available test frameworks in a workspace
+  ipcMain.handle('test:detectFrameworks', async (_e, workspace: string) => {
+    const { detectFrameworks } = await import('./test-runner')
+    return detectFrameworks(workspace)
+  })
+
+  // Open Playwright HTML report
+  ipcMain.handle(IPC.PLAYWRIGHT_OPEN_REPORT, async (_e, workspace: string) => {
+    try {
+      const { exec } = await import('child_process')
+      const cmd = process.platform === 'win32'
+        ? `powershell.exe -Command "npx playwright show-report"`
+        : 'npx playwright show-report'
+      exec(cmd, { cwd: workspace })
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  // ── Database browser ───────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.DB_QUERY, async (_e, connStr: string, sql: string, workspacePath: string) => {
+    try {
+      const { queryDatabase } = await import('./db-tool')
+      const result = await queryDatabase(connStr, sql, workspacePath || '')
+      return { ok: !result.isError, output: result.output }
+    } catch (e) {
+      return { ok: false, output: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DB_LIST_TABLES, async (_e, connStr: string, workspacePath: string) => {
+    try {
+      const { queryDatabase } = await import('./db-tool')
+      // Pick the right introspection query per database type
+      const isPostgres = connStr.startsWith('postgres://') || connStr.startsWith('postgresql://')
+      const isMySQL    = connStr.startsWith('mysql://') || connStr.startsWith('mysql2://')
+      const sql = isPostgres
+        ? `SELECT table_name, (SELECT reltuples::bigint FROM pg_class WHERE relname = table_name) AS row_count FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`
+        : isMySQL
+          ? `SELECT TABLE_NAME AS table_name, TABLE_ROWS AS row_count FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`
+          : `SELECT name as table_name, (SELECT COUNT(*) FROM sqlite_master sm2 WHERE sm2.type='table' AND sm2.name=sm.name) as row_count FROM sqlite_master sm WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+      const result = await queryDatabase(connStr, sql, workspacePath || '')
+      return { ok: !result.isError, output: result.output }
+    } catch (e) {
+      return { ok: false, output: String(e) }
+    }
+  })
+
+  // ── Docker manager ─────────────────────────────────────────────────────────
+
+  // Map of containerId → active log-stream process
+  const dockerLogStreams = new Map<string, ChildProcess>()
+
+  function runDocker(args: string[]): string {
+    return execSync(`docker ${args.join(' ')}`, { encoding: 'utf-8', timeout: 10000 })
+  }
+
+  function parseDockerLines<T>(raw: string): T[] {
+    return raw.trim().split('\n')
+      .filter(l => l.trim())
+      .map(l => { try { return JSON.parse(l) } catch { return null } })
+      .filter(Boolean) as T[]
+  }
+
+  ipcMain.handle(IPC.DOCKER_CHECK, (): { ok: boolean; version?: string; error?: string } => {
+    try {
+      const raw = execSync('docker version --format "{{.Server.Version}}"', { encoding: 'utf-8', timeout: 5000 }).trim()
+      return { ok: true, version: raw }
+    } catch {
+      return { ok: false, error: 'Docker is not installed or the daemon is not running.' }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_LIST_CONTAINERS, (): { ok: boolean; containers?: unknown[]; error?: string } => {
+    try {
+      const raw = runDocker(['ps', '-a', '--format', '"{{json .}}"'])
+      const containers = parseDockerLines(raw).map((c: Record<string, string>) => ({
+        id:         c.ID,
+        name:       (c.Names ?? '').replace(/^\//, ''),
+        image:      c.Image,
+        state:      c.State,
+        status:     c.Status,
+        ports:      c.Ports ?? '',
+        createdAt:  c.CreatedAt ?? '',
+        runningFor: c.RunningFor ?? '',
+      }))
+      return { ok: true, containers }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_LIST_IMAGES, (): { ok: boolean; images?: unknown[]; error?: string } => {
+    try {
+      const raw = runDocker(['images', '--format', '"{{json .}}"'])
+      const images = parseDockerLines(raw).map((i: Record<string, string>) => ({
+        id:         i.ID,
+        repository: i.Repository,
+        tag:        i.Tag,
+        size:       i.Size,
+        createdAt:  i.CreatedSince ?? i.CreatedAt ?? '',
+      }))
+      return { ok: true, images }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_LIST_VOLUMES, (): { ok: boolean; volumes?: unknown[]; error?: string } => {
+    try {
+      const raw = runDocker(['volume', 'ls', '--format', '"{{json .}}"'])
+      const volumes = parseDockerLines(raw).map((v: Record<string, string>) => ({
+        name:       v.Name,
+        driver:     v.Driver,
+        mountpoint: v.Mountpoint ?? '',
+      }))
+      return { ok: true, volumes }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_CONTAINER_ACTION, (_e, action: string, id: string): { ok: boolean; error?: string } => {
+    try {
+      if (action === 'remove') runDocker(['rm', '-f', id])
+      else runDocker([action, id])
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_GET_LOGS, (_e, id: string, lines = 200): { ok: boolean; logs?: string; error?: string } => {
+    try {
+      const logs = runDocker(['logs', '--tail', String(lines), id])
+      return { ok: true, logs }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_STREAM_LOGS, (_e, id: string): { ok: boolean; error?: string } => {
+    try {
+      // Kill any existing stream for this container
+      const existing = dockerLogStreams.get(id)
+      if (existing) { try { existing.kill() } catch { /**/ } }
+
+      const child = spawn('docker', ['logs', '-f', '--tail', '50', id])
+      dockerLogStreams.set(id, child)
+
+      const send = (data: Buffer) =>
+        mainWindow.webContents.send(IPC.DOCKER_LOG_CHUNK, { containerId: id, data: data.toString() })
+
+      child.stdout?.on('data', send)
+      child.stderr?.on('data', send)
+      child.on('close', () => dockerLogStreams.delete(id))
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_STOP_LOGS, (_e, id: string): { ok: boolean } => {
+    const child = dockerLogStreams.get(id)
+    if (child) { try { child.kill() } catch { /**/ } dockerLogStreams.delete(id) }
+    return { ok: true }
+  })
+
+  ipcMain.handle(IPC.DOCKER_STATS, (_e, id: string): { ok: boolean; stats?: unknown; error?: string } => {
+    try {
+      const raw = execSync(`docker stats --no-stream --format "{{json .}}" ${id}`, { encoding: 'utf-8', timeout: 8000 })
+      const parsed = parseDockerLines<Record<string, string>>(raw)[0]
+      if (!parsed) return { ok: false, error: 'No stats returned' }
+      return { ok: true, stats: {
+        cpuPct:   parsed.CPUPerc   ?? '0%',
+        memUsage: parsed.MemUsage  ?? '0B / 0B',
+        memPct:   parsed.MemPerc   ?? '0%',
+        netIO:    parsed.NetIO     ?? '0B / 0B',
+        blockIO:  parsed.BlockIO   ?? '0B / 0B',
+        pids:     parsed.PIDs      ?? '0',
+      }}
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_IMAGE_ACTION, (_e, action: string, id: string): { ok: boolean; error?: string } => {
+    try {
+      if (action === 'remove') runDocker(['rmi', '-f', id])
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle(IPC.DOCKER_VOLUME_ACTION, (_e, action: string, name: string): { ok: boolean; error?: string } => {
+    try {
+      if (action === 'remove') runDocker(['volume', 'rm', name])
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  })
+
+  // ── Dependency Audit ──────────────────────────────────────────────────────
+  ipcMain.handle(IPC.DEP_AUDIT, (_e, workspacePath: string): { ok: boolean; result?: AuditResult; error?: string } => {
+    if (!workspacePath || !existsSync(workspacePath)) {
+      return { ok: false, error: 'No workspace path set' }
+    }
+
+    // Detect package manager + lockfile
+    const has = (f: string) => existsSync(join(workspacePath, f))
+
+    // npm / yarn / pnpm (Node)
+    if (has('package.json')) {
+      let manager: 'npm' | 'yarn' | 'pnpm' = 'npm'
+      if (has('pnpm-lock.yaml')) manager = 'pnpm'
+      else if (has('yarn.lock')) manager = 'yarn'
+
+      try {
+        const raw = execSync(`${manager} audit --json`, {
+          cwd: workspacePath, timeout: 60_000, encoding: 'utf8'
+        })
+        return { ok: true, result: parseNodeAudit(raw, manager) }
+      } catch (e: unknown) {
+        // npm audit exits with non-zero when vulns found — output is still valid JSON
+        const output = (e as { stdout?: string }).stdout ?? String(e)
+        try {
+          return { ok: true, result: parseNodeAudit(output, manager) }
+        } catch {
+          return { ok: false, error: String(e) }
+        }
+      }
+    }
+
+    // Cargo (Rust)
+    if (has('Cargo.toml')) {
+      try {
+        const raw = execSync('cargo audit --json', {
+          cwd: workspacePath, timeout: 120_000, encoding: 'utf8'
+        })
+        return { ok: true, result: parseCargoAudit(raw) }
+      } catch (e) {
+        return { ok: false, error: String(e) }
+      }
+    }
+
+    // pip / requirements.txt (Python) — uses pip-audit
+    if (has('requirements.txt') || has('setup.py') || has('pyproject.toml')) {
+      try {
+        const raw = execSync('pip-audit --format json', {
+          cwd: workspacePath, timeout: 120_000, encoding: 'utf8'
+        })
+        return { ok: true, result: parsePipAudit(raw) }
+      } catch (e) {
+        return { ok: false, error: String(e) }
+      }
+    }
+
+    return { ok: false, error: 'No supported package file found (package.json, Cargo.toml, requirements.txt)' }
+  })
+
+  // ── Inline code completions ─────────────────────────────────────────────────
+  ipcMain.handle(IPC.COMPLETION_REQUEST, async (_e, payload: {
+    prefix:   string
+    suffix:   string
+    language: string
+    settings: AppSettings
+  }): Promise<{ ok: boolean; text: string; error?: string }> => {
+    try {
+      const { prefix, suffix, language, settings } = payload
+      if (!settings.apiKey && settings.provider !== 'gemini') {
+        return { ok: false, text: '' }
+      }
+
+      const prompt =
+        `You are a code completion engine. Complete the code at the cursor position.\n` +
+        `Rules:\n` +
+        `- Output ONLY the completion text — no explanations, no markdown fences, no repetition\n` +
+        `- Continue naturally from exactly where the code stops\n` +
+        `- Keep completions concise (1-5 lines usually)\n` +
+        `- Language: ${language}\n\n` +
+        `Code before cursor:\n${prefix.slice(-1200)}\n\n` +
+        `Code after cursor:\n${suffix.slice(0, 300)}`
+
+      // Use fast/lightweight model if configured; fall back to primary model
+      const completionModel   = settings.fastModel || settings.model
+      const completionSettings: AppSettings = { ...settings, model: completionModel, maxTokens: 200 }
+      const client = new AIClient(completionSettings)
+
+      let text = ''
+      for await (const chunk of client.streamMessage([{ role: 'user', content: prompt }])) {
+        text += chunk
+        if (text.length > 400) break   // cap at 400 chars — completions should be short
+      }
+
+      // Strip accidental code fences
+      let clean = text.trim()
+      if (clean.startsWith('```')) {
+        clean = clean.replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim()
+      }
+
+      return { ok: true, text: clean }
+    } catch (e) {
+      return { ok: false, text: '', error: String(e) }
+    }
+  })
+}
+
+// ── Audit parsers ─────────────────────────────────────────────────────────────
+function parseNodeAudit(raw: string, manager: 'npm' | 'yarn' | 'pnpm'): AuditResult {
+  const data = JSON.parse(raw)
+
+  // npm v7+ audit format
+  if (data.metadata) {
+    const meta = data.metadata.vulnerabilities ?? {}
+    const vulns: import('../shared/types').AuditVulnerability[] = []
+    for (const [name, adv] of Object.entries(data.vulnerabilities ?? {})) {
+      const a = adv as Record<string, unknown>
+      const severity = (a.severity as string ?? 'info').toLowerCase() as import('../shared/types').AuditSeverity
+      vulns.push({
+        name,
+        severity,
+        title:    (a.title as string) ?? (a.name as string) ?? name,
+        url:      (a.url as string) ?? '',
+        range:    (a.range as string) ?? '',
+        fixedIn:  (a.fixAvailable as { version?: string })?.version ?? (typeof a.fixAvailable === 'string' ? a.fixAvailable : ''),
+        via:      Array.isArray(a.via) ? a.via.filter((v: unknown) => typeof v === 'string') as string[] : [],
+        isDirect: (a.isDirect as boolean) ?? false,
+      })
+    }
+    return {
+      manager,
+      total:    meta.total ?? vulns.length,
+      critical: meta.critical ?? 0,
+      high:     meta.high ?? 0,
+      moderate: meta.moderate ?? 0,
+      low:      meta.low ?? 0,
+      info:     meta.info ?? 0,
+      vulns,
+      raw,
+    }
+  }
+
+  // Fallback: just return raw
+  return { manager, total: 0, critical: 0, high: 0, moderate: 0, low: 0, info: 0, vulns: [], raw }
+}
+
+function parseCargoAudit(raw: string): AuditResult {
+  const data = JSON.parse(raw)
+  const vulns: import('../shared/types').AuditVulnerability[] = (data.vulnerabilities?.list ?? []).map((v: Record<string, unknown>) => {
+    const adv = v.advisory as Record<string, unknown>
+    return {
+      name:     (adv.package as string) ?? '',
+      severity: 'high' as import('../shared/types').AuditSeverity,
+      title:    (adv.title as string) ?? '',
+      url:      (adv.url as string) ?? '',
+      range:    '',
+      fixedIn:  '',
+      via:      [],
+      isDirect: true,
+    }
+  })
+  return {
+    manager: 'cargo',
+    total:    vulns.length,
+    critical: 0,
+    high:     vulns.length,
+    moderate: 0,
+    low:      0,
+    info:     0,
+    vulns,
+    raw,
+  }
+}
+
+function parsePipAudit(raw: string): AuditResult {
+  const rows = JSON.parse(raw) as Array<Record<string, unknown>>
+  const vulns: import('../shared/types').AuditVulnerability[] = []
+  for (const row of rows) {
+    for (const v of (row.vulns as Array<Record<string, unknown>> ?? [])) {
+      vulns.push({
+        name:     (row.name as string) ?? '',
+        severity: 'high' as import('../shared/types').AuditSeverity,
+        title:    (v.id as string) ?? '',
+        url:      `https://osv.dev/vulnerability/${v.id}`,
+        range:    '',
+        fixedIn:  (v.fix_versions as string[])?.join(', ') ?? '',
+        via:      [],
+        isDirect: true,
+      })
+    }
+  }
+  return {
+    manager: 'pip',
+    total:    vulns.length,
+    critical: 0,
+    high:     vulns.length,
+    moderate: 0,
+    low:      0,
+    info:     0,
+    vulns,
+    raw,
+  }
 }

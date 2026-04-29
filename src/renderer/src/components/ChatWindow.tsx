@@ -18,18 +18,27 @@ import TaskQueuePanel from './TaskQueuePanel'
 import ContextTokenBar, { ContextCircle } from './ContextTokenBar'
 import ModeTabBar from './ModeTabBar'
 import AgentProgressPanel from './AgentProgressPanel'
+import AgentView from './AgentView'
 import ActivityPanel from './ActivityPanel'
 import VoiceRecorder from './VoiceRecorder'
 import ReviewPanel from './ReviewPanel'
 import PairModePanel from './PairModePanel'
+import DatabaseBrowserPanel from './DatabaseBrowserPanel'
+import TestRunnerPanel from './TestRunnerPanel'
+import SessionReplayPanel from './SessionReplayPanel'
+import SlashCommandMenu, { filterSlashCommands, SlashCommand } from './SlashCommandMenu'
 import { useChat } from '../hooks/useChat'
 import { estimateTokens, estimateCost, formatTokens, formatCost, hasKnownPricing, getContextWarning } from '../utils/tokenCost'
 
 const isElectron = typeof window !== 'undefined' && !!window.api
 
-// ── Public handle (for parent to call focusInput via ref) ─────────────────────
+// ── Public handle (for parent to call focusInput / inject text via ref) ──────
 export interface ChatWindowHandle {
   focusInput: () => void
+  /** Prepend text into the chat input (used by editor "Ask AI" button) */
+  setInputText: (text: string) => void
+  /** Scroll to and briefly highlight a specific message by id */
+  scrollToMessage: (msgId: string) => void
 }
 
 // ── File attachment types ─────────────────────────────────────────────────────
@@ -72,6 +81,20 @@ interface Props {
   initialWorkspacePath?: string
   /** Called once ChatWindow has consumed initialWorkspacePath so parent can clear it */
   onWorkspacePathConsumed?: () => void
+  /** Pre-set agent task prompt — auto-sends in Agent mode once the component mounts */
+  initialAgentTask?: string
+  /** Called once ChatWindow has consumed initialAgentTask so parent can clear it */
+  onAgentTaskConsumed?: () => void
+  /** Opens the Monaco code editor panel alongside the chat */
+  onOpenEditor?: () => void
+  /** Called whenever the per-conversation workspace folder changes */
+  onWorkspaceChange?: (path: string | undefined) => void
+  /** Navigate directly to a different conversation by id (used by branch → parent) */
+  onNavigateTo?: (id: string) => void
+  /** Message id to scroll to on mount (from global search) */
+  initialScrollToMsgId?: string
+  /** Called once ChatWindow has consumed initialScrollToMsgId */
+  onScrollToMsgConsumed?: () => void
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -145,27 +168,22 @@ function MentionChip({ file, onRemove }: { file: MentionFile; onRemove: () => vo
   )
 }
 
-// ── Image chip (green — pasted / dragged image) ───────────────────────────────
+// ── Image chip (thumbnail card — pasted / dragged image) ─────────────────────
 function ImageChip({ image, onRemove }: { image: AttachedImage; onRemove: () => void }) {
   return (
-    <div
-      className="flex items-center gap-1.5 bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-700 rounded-lg pl-1 pr-2 py-1 text-xs"
-      title={image.name}
-    >
-      {/* Thumbnail */}
+    <div className="relative group/img flex-shrink-0" title={`${image.name} · ${formatBytes(image.size)}`}>
       <img
         src={image.previewUrl}
         alt={image.name}
-        className="w-8 h-8 rounded-md object-cover flex-shrink-0 bg-white/20"
+        className="w-14 h-14 rounded-xl object-cover border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800"
       />
-      <div className="flex flex-col min-w-0">
-        <span className="text-emerald-700 dark:text-emerald-300 font-medium max-w-[120px] truncate leading-tight">
-          {image.name}
-        </span>
-        <span className="text-emerald-500 dark:text-emerald-600 leading-tight">{formatBytes(image.size)}</span>
-      </div>
-      <button onClick={onRemove} className="ml-0.5 text-emerald-400 hover:text-red-500 transition-colors flex-shrink-0" title="Remove image">
-        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+      {/* Remove button — appears on hover */}
+      <button
+        onClick={onRemove}
+        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-gray-800 dark:bg-gray-600 text-white flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity shadow"
+        title="Remove image"
+      >
+        <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
         </svg>
       </button>
@@ -241,11 +259,12 @@ function modelShortName(m: string, provider: string): string {
 }
 
 function ModelPicker({
-  settings, onApply, openUp = false
+  settings, onApply, openUp = false, compact = false
 }: {
   settings: AppSettings
   onApply: (model: string, provider: Provider) => void
   openUp?: boolean
+  compact?: boolean
 }) {
   const [open, setOpen]         = useState(false)
   const [search, setSearch]     = useState('')
@@ -378,20 +397,17 @@ function ModelPicker({
       <button
         ref={triggerRef}
         onClick={() => setOpen(o => !o)}
-        title="Switch model or provider"
-        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium
-                   text-gray-500 dark:text-gray-400
-                   hover:text-gray-800 dark:hover:text-gray-100
-                   hover:bg-gray-100 dark:hover:bg-gray-800
-                   border border-transparent hover:border-gray-200 dark:hover:border-gray-700
-                   transition-all group"
+        title={compact ? `${shortName || settings.model} (${PROVIDER_LABELS[settings.provider] ?? settings.provider}) — click to switch` : 'Switch model or provider'}
+        className={`flex items-center gap-1.5 rounded-lg text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800 border border-transparent hover:border-gray-200 dark:hover:border-gray-700 transition-all group ${compact ? 'w-7 h-7 justify-center' : 'px-2.5 py-1.5'}`}
       >
         <span className="text-gray-400 dark:text-gray-500 group-hover:text-blue-500 transition-colors">{icon}</span>
-        <span className="max-w-[160px] truncate">{shortName || settings.model}</span>
-        <span className="text-gray-300 dark:text-gray-600 text-[10px]">{PROVIDER_LABELS[settings.provider] ?? settings.provider}</span>
-        <svg className={`w-2.5 h-2.5 opacity-50 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-        </svg>
+        {!compact && <span className="max-w-[160px] truncate">{shortName || settings.model}</span>}
+        {!compact && <span className="text-gray-300 dark:text-gray-600 text-[10px]">{PROVIDER_LABELS[settings.provider] ?? settings.provider}</span>}
+        {!compact && (
+          <svg className={`w-2.5 h-2.5 opacity-50 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        )}
       </button>
 
       {open && dropdownPos && ReactDOM.createPortal(
@@ -600,12 +616,13 @@ const DEPTH_CONFIG = {
 type DepthKey = keyof typeof DEPTH_CONFIG
 
 function ReasoningDepthPicker({
-  provider, model, depth, onChange
+  provider, model, depth, onChange, compact
 }: {
   provider: string
   model:    string
   depth:    DepthKey
   onChange: (d: DepthKey) => void
+  compact?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -643,15 +660,15 @@ function ReasoningDepthPicker({
       <button
         onClick={() => setOpen(o => !o)}
         title={`Reasoning depth: ${cfg.label} — ${cfg.desc}`}
-        className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium
-                    border border-transparent hover:border-gray-200 dark:hover:border-gray-700
-                    hover:bg-gray-100 dark:hover:bg-gray-800 transition-all ${cfg.color}`}
+        className={`flex items-center gap-1 rounded-lg text-xs font-medium border border-transparent hover:border-gray-200 dark:hover:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition-all ${cfg.color} ${compact ? 'w-7 h-7 justify-center' : 'px-2 py-1.5'}`}
       >
         <span>{cfg.icon}</span>
-        <span>{cfg.label}</span>
-        <svg className={`w-2.5 h-2.5 opacity-50 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-        </svg>
+        {!compact && <span>{cfg.label}</span>}
+        {!compact && (
+          <svg className={`w-2.5 h-2.5 opacity-50 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        )}
       </button>
 
       {open && (
@@ -702,8 +719,8 @@ function ReasoningDepthPicker({
 
 // ── Quick template menu (chat header) ────────────────────────────────────────
 function QuickTemplateMenu({
-  currentPrompt, onApply
-}: { currentPrompt: string; onApply: (prompt: string) => void }) {
+  currentPrompt, onApply, compact
+}: { currentPrompt: string; onApply: (prompt: string) => void; compact?: boolean }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const active = findMatchingTemplate(currentPrompt)
@@ -721,15 +738,15 @@ function QuickTemplateMenu({
     <div ref={ref} className="relative" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
       <button
         onClick={() => setOpen(o => !o)}
-        className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors ${
+        className={`flex items-center gap-1 rounded-md text-xs transition-colors ${compact ? 'w-7 h-7 justify-center' : 'px-2 py-1'} ${
           active
             ? 'text-blue-500 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30'
             : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
         }`}
-        title="Switch prompt template"
+        title={compact ? (active?.name ?? 'Template') : 'Switch prompt template'}
       >
         <span className="text-sm leading-none">{active?.icon ?? '⚡'}</span>
-        <span className="hidden sm:inline">{active?.name ?? 'Template'}</span>
+        {!compact && <span>{active?.name ?? 'Template'}</span>}
       </button>
 
       {open && (
@@ -772,11 +789,13 @@ function QuickTemplateMenu({
 
 // ── Export dropdown ───────────────────────────────────────────────────────────
 function ExportMenu({
-  title, messages, disabled
+  title, messages, conversation, disabled, compact
 }: {
   title: string
   messages: { role: string; content: string }[]
+  conversation: import('../../../shared/types').Conversation | null
   disabled: boolean
+  compact?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -790,11 +809,17 @@ function ExportMenu({
     return () => document.removeEventListener('mousedown', close)
   }, [open])
 
-  const doExport = async (format: 'md' | 'txt') => {
+  const doExport = async (format: 'md' | 'txt' | 'json') => {
     setOpen(false)
     if (!isElectron || messages.length === 0) return
-    const content  = format === 'md' ? buildMarkdown(title, messages) : buildText(title, messages)
     const safeName = title.replace(/[^a-z0-9 _-]/gi, '').trim().replace(/\s+/g, '-') || 'chat'
+    let content: string
+    if (format === 'json') {
+      // Full conversation object — can be re-imported perfectly
+      content = JSON.stringify(conversation ?? { title, messages, createdAt: Date.now(), updatedAt: Date.now() }, null, 2)
+    } else {
+      content = format === 'md' ? buildMarkdown(title, messages) : buildText(title, messages)
+    }
     await window.api.exportChat({ defaultName: safeName, content, format })
   }
 
@@ -803,20 +828,25 @@ function ExportMenu({
       <button
         onClick={() => setOpen(o => !o)}
         disabled={disabled}
-        className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200
-                   hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        className={`flex items-center gap-1 rounded-md text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${compact ? 'w-7 h-7 justify-center' : 'px-2 py-1'}`}
         title="Export conversation"
       >
         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round"
             d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
         </svg>
-        Export
+        {!compact && 'Export'}
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700
+        <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700
                         rounded-lg shadow-lg py-1 z-50 text-sm">
+          <button
+            onClick={() => doExport('json')}
+            className="w-full text-left px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-300 flex items-center gap-2"
+          >
+            <span className="text-base">💾</span> JSON (importable)
+          </button>
           <button
             onClick={() => doExport('md')}
             className="w-full text-left px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-300 flex items-center gap-2"
@@ -846,13 +876,39 @@ interface MessageListProps {
   editMessage:      (id: string, content: string) => void
   handleBranch:     (messageId: string) => void
   rateMessage:      (id: string, rating: 'up' | 'down') => void
+  scrollToMsgId?:   string
+  onScrollConsumed?: () => void
   setEditorFile:    (path: string) => void
   onOpenSettings?:  () => void
   activeWorkspace?: string
 }
 
-function MessageList({ messages, settings, isStreaming, messagesEndRef, editMessage, handleBranch, rateMessage, setEditorFile, onOpenSettings, activeWorkspace }: MessageListProps) {
+function MessageList({ messages, settings, isStreaming, messagesEndRef, editMessage, handleBranch, rateMessage, setEditorFile, onOpenSettings, activeWorkspace, scrollToMsgId, onScrollConsumed }: MessageListProps) {
   const [visibleStart, setVisibleStart] = useState(() => Math.max(0, messages.length - PAGE_SIZE))
+
+  // Scroll to target message (from global search or audit log jump)
+  useEffect(() => {
+    if (!scrollToMsgId) return
+    // If the target message is in the hidden range, expose it
+    const targetIdx = messages.findIndex(m => m.id === scrollToMsgId)
+    if (targetIdx >= 0 && targetIdx < visibleStart) {
+      setVisibleStart(0)  // show all messages
+    }
+    // After render, scroll to the element and flash-highlight it
+    const timer = setTimeout(() => {
+      const el = document.getElementById(`msg-${scrollToMsgId}`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        el.style.transition = 'background-color 0.3s ease'
+        el.style.backgroundColor = 'rgba(253, 224, 71, 0.35)'  // yellow flash
+        setTimeout(() => { el.style.backgroundColor = ''; onScrollConsumed?.() }, 1800)
+      } else {
+        onScrollConsumed?.()
+      }
+    }, 120)
+    return () => clearTimeout(timer)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollToMsgId])
 
   useEffect(() => {
     // When new messages are added at the end (streaming/send), show them
@@ -878,25 +934,51 @@ function MessageList({ messages, settings, isStreaming, messagesEndRef, editMess
       )}
       {visibleMessages.map((msg, idx) => {
         const absoluteIdx = visibleStart + idx
-        const isLastAI = msg.role === 'assistant' && absoluteIdx === messages.length - 1 && !msg.isStreaming
+        const isLastAI    = msg.role === 'assistant' && absoluteIdx === messages.length - 1 && !msg.isStreaming
+
+        // Detect mode transitions — show a divider when agent mode toggles
+        const prevMsg        = absoluteIdx > 0 ? messages[absoluteIdx - 1] : null
+        const prevWasAgent   = !!(prevMsg?.agentMode)
+        const thisIsAgent    = !!(msg.agentMode)
+        const modeChanged    = prevMsg !== null && prevWasAgent !== thisIsAgent && msg.role === 'assistant'
+
         return (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            settings={settings}
-            isLastAI={isLastAI}
-            chatStreaming={isStreaming}
-            onEdit={editMessage}
-            onRegenerate={(aiMsgId) => {
-              const aiIdx   = messages.findIndex(m => m.id === aiMsgId)
-              const userMsg = [...messages.slice(0, aiIdx)].reverse().find(m => m.role === 'user')
-              if (userMsg) editMessage(userMsg.id, userMsg.content)
-            }}
-            onBranch={handleBranch}
-            onRate={rateMessage}
-            onOpenFile={activeWorkspace ? (path) => setEditorFile(path) : undefined}
-            onOpenSettings={onOpenSettings}
-          />
+          <React.Fragment key={msg.id}>
+            <div id={`msg-${msg.id}`} style={{ borderRadius: '0.5rem' }}>
+            {modeChanged && (
+              <div className="flex items-center gap-2 px-4 py-1 select-none">
+                <div className="flex-1 h-px bg-gradient-to-r from-transparent via-gray-200 dark:via-gray-700 to-transparent" />
+                <span className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border ${
+                  thisIsAgent
+                    ? 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800'
+                    : 'text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700'
+                }`}>
+                  {thisIsAgent
+                    ? <><span>⚡</span> Switched to Agent mode</>
+                    : <><span>💬</span> Switched to Code mode</>
+                  }
+                </span>
+                <div className="flex-1 h-px bg-gradient-to-r from-transparent via-gray-200 dark:via-gray-700 to-transparent" />
+              </div>
+            )}
+            <MessageBubble
+              message={msg}
+              settings={settings}
+              isLastAI={isLastAI}
+              chatStreaming={isStreaming}
+              onEdit={editMessage}
+              onRegenerate={(aiMsgId) => {
+                const aiIdx   = messages.findIndex(m => m.id === aiMsgId)
+                const userMsg = [...messages.slice(0, aiIdx)].reverse().find(m => m.role === 'user')
+                if (userMsg) editMessage(userMsg.id, userMsg.content)
+              }}
+              onBranch={handleBranch}
+              onRate={rateMessage}
+              onOpenFile={activeWorkspace ? (path) => setEditorFile(path) : undefined}
+              onOpenSettings={onOpenSettings}
+            />
+            </div>
+          </React.Fragment>
         )
       })}
       <div ref={messagesEndRef} />
@@ -907,7 +989,9 @@ function MessageList({ messages, settings, isStreaming, messagesEndRef, editMess
 // ── Main component ────────────────────────────────────────────────────────────
 const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   { conversation, settings, onConversationUpdate, onSettingsUpdate, onNew, onOpenSearch, onOpenSettings,
-    initialWorkspacePath, onWorkspacePathConsumed }, ref
+    initialWorkspacePath, onWorkspacePathConsumed,
+    initialAgentTask, onAgentTaskConsumed, onOpenEditor, onWorkspaceChange, onNavigateTo,
+    initialScrollToMsgId, onScrollToMsgConsumed }, ref
 ) {
   const [input,           setInput]           = useState(() => {
     try { return localStorage.getItem(`draft-${conversation?.id ?? 'new'}`) ?? '' } catch { return '' }
@@ -918,6 +1002,8 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   const [fileError,       setFileError]       = useState<string | null>(null)
   const [memoryOpen,      setMemoryOpen]      = useState(false)
   const [summaryOpen,     setSummaryOpen]     = useState(false)
+  const [auditOpen,       setAuditOpen]       = useState(false)
+  const [scrollToMsgId,   setScrollToMsgId]   = useState<string | undefined>(initialScrollToMsgId)
   const [promptLibOpen,   setPromptLibOpen]   = useState(false)
   const [pinsOpen,        setPinsOpen]        = useState(false)
   const [pinsCount,       setPinsCount]       = useState(0)
@@ -930,9 +1016,85 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   const [editorFile,      setEditorFile]      = useState<string | null>(null)
   // Task queue
   const [queueOpen,       setQueueOpen]       = useState(false)
+  // Database browser
+  const [dbBrowserOpen,   setDbBrowserOpen]   = useState(false)
+  // Test runner
+  const [testRunnerOpen,  setTestRunnerOpen]  = useState(false)
   // Custom plugins
   const [pluginsCount,    setPluginsCount]    = useState(0)
   const [ragChunks,       setRagChunks]       = useState(0)
+
+  // ── Responsive panel tracking ─────────────────────────────────────────────
+  // We measure the ACTUAL right-side width each frame so compact triggers the
+  // instant the two sides would collide — no magic fixed pixel constants.
+  const panelRef    = useRef<HTMLDivElement>(null)
+  const hdrRightRef = useRef<HTMLDivElement>(null)   // right toolbar section
+
+  const [panelWidth,    setPanelWidth]    = useState(800)
+  const [headerCompact, setHeaderCompact] = useState(false)  // mode-tab icons only
+  const [headerMinimal, setHeaderMinimal] = useState(false)  // right toolbar → ⋯ overflow
+
+  useLayoutEffect(() => {
+    const el = panelRef.current
+    if (!el) return
+    const update = () => {
+      const containerW = el.clientWidth
+      setPanelWidth(containerW)
+
+      // ── Header collision ──────────────────────────────────────────────────
+      if (hdrRightRef.current) {
+        const rightW    = hdrRightRef.current.offsetWidth
+        const leftAvail = containerW - rightW - 24  // 24 = px-3 padding × 2
+        // ModeTabBar full labels ≈ 310px. Hysteresis prevents flicker.
+        setHeaderCompact(prev => prev ? leftAvail <= 370 : leftAvail < 326)
+        setHeaderMinimal(prev => prev ? leftAvail <= 120 : leftAvail < 96)
+      }
+
+      // ── Bottom bar collision ──────────────────────────────────────────────
+      if (btmRightRef.current) {
+        const rightW    = btmRightRef.current.offsetWidth
+        const leftAvail = containerW - rightW - 16  // 16 = px-1 padding × 2
+        // Bottom-left full labels (folder + approve-edits + approve-cmds) ≈ 330px
+        setBottomCompact(prev => prev ? leftAvail <= 380 : leftAvail < 330)
+        setBottomMinimal(prev => prev ? leftAvail <= 120 : leftAvail < 96)
+      }
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Bottom-bar: same dynamic collision detection as the header
+  const btmRightRef = useRef<HTMLDivElement>(null)
+  const [bottomCompact, setBottomCompact] = useState(false)
+  const [bottomMinimal, setBottomMinimal] = useState(false)
+
+  // Overflow menu open state (top-right toolbar ⋯)
+  const [overflowOpen, setOverflowOpen] = useState(false)
+  const overflowRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!overflowOpen) return
+    const h = (e: MouseEvent) => {
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node))
+        setOverflowOpen(false)
+    }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [overflowOpen])
+
+  // Bottom-left overflow menu
+  const [bottomOverflowOpen, setBottomOverflowOpen] = useState(false)
+  const bottomOverflowRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!bottomOverflowOpen) return
+    const h = (e: MouseEvent) => {
+      if (bottomOverflowRef.current && !bottomOverflowRef.current.contains(e.target as Node))
+        setBottomOverflowOpen(false)
+    }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [bottomOverflowOpen])
 
   // @-mention state
   const [mentionQuery,   setMentionQuery]   = useState<string | null>(null)  // null = inactive
@@ -940,10 +1102,18 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   const [mentionFiles,   setMentionFiles]   = useState<string[]>([])          // cached workspace paths
   const [mentionChips,   setMentionChips]   = useState<MentionFile[]>([])    // attached via @
 
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const textareaRef    = useRef<HTMLTextAreaElement>(null)
-  const fileInputRef   = useRef<HTMLInputElement>(null)
-  const dragCounter    = useRef(0)
+  // Slash-command state
+  const [slashQuery,     setSlashQuery]     = useState<string | null>(null)  // null = inactive
+  const [slashAnchor,    setSlashAnchor]    = useState(0)                    // index of '/' in input
+  const [slashActiveIdx, setSlashActiveIdx] = useState(0)
+
+  const messagesEndRef      = useRef<HTMLDivElement>(null)
+  const scrollContainerRef  = useRef<HTMLDivElement>(null)
+  const textareaRef         = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef        = useRef<HTMLInputElement>(null)
+  const dragCounter         = useRef(0)
+
+  const [showScrollBtn, setShowScrollBtn] = useState(false)
 
   const [mode, setMode] = useState<ConversationMode>(conversation?.mode ?? 'code')
   const [activityOpen, setActivityOpen] = useState(false)
@@ -965,10 +1135,16 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+
   // Sync workspace when switching conversations
   useEffect(() => {
     setConvWorkspace(safeWorkspace(conversation?.workspacePath))
   }, [conversation?.id])
+
+  // Notify parent whenever convWorkspace changes (so editor panel can follow)
+  useEffect(() => {
+    onWorkspaceChange?.(convWorkspace)
+  }, [convWorkspace])
 
   const handlePickFolder = useCallback(async () => {
     if (!isElectron) return
@@ -1014,15 +1190,79 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     conversation, settings, onConversationUpdate, mode, workspacePath: convWorkspace
   })
 
-  // Expose focusInput to parent (keyboard shortcut Ctrl+/)
+  // Consume initialScrollToMsgId on mount
+  useEffect(() => {
+    if (!initialScrollToMsgId) return
+    setScrollToMsgId(initialScrollToMsgId)
+    onScrollToMsgConsumed?.()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Expose focusInput / setInputText / scrollToMessage to parent
   useImperativeHandle(ref, () => ({
-    focusInput: () => textareaRef.current?.focus()
+    focusInput: () => textareaRef.current?.focus(),
+    setInputText: (text: string) => {
+      setInput(prev => text + prev)
+      setTimeout(() => textareaRef.current?.focus(), 50)
+    },
+    scrollToMessage: (msgId: string) => setScrollToMsgId(msgId),
   }))
 
-  // Auto-scroll
+  // Auto-send initialAgentTask in Agent mode (used by GitHub "Fix with Agent" button)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (!initialAgentTask) return
+    setMode('agent')
+    const timer = setTimeout(() => {
+      sendMessage(initialAgentTask)
+      onAgentTaskConsumed?.()
+    }, 300)
+    return () => clearTimeout(timer)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Track message count and last streaming state to detect "stream just finished"
+  const prevMsgCountRef    = useRef(0)
+  const prevWasStreamingRef = useRef(false)
+
+  // Auto-scroll rules:
+  //   • New message added (count increased)      → always scroll
+  //   • Stream just finished (isStreaming → done) → always scroll (bubble grew with action row)
+  //   • Streaming chunk arriving                  → scroll only if already near bottom
+  //   • Any other update while scrolled up        → don't interrupt reading
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    const countChanged   = messages.length !== prevMsgCountRef.current
+    const isNowStreaming = messages.some(m => m.isStreaming)
+    const streamJustEnded = prevWasStreamingRef.current && !isNowStreaming
+
+    prevMsgCountRef.current     = messages.length
+    prevWasStreamingRef.current = isNowStreaming
+
+    const scroll = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+
+    if (!el) { scroll(); return }
+
+    if (countChanged || streamJustEnded) {
+      // New message added OR stream just finished — always jump to bottom
+      scroll()
+    } else if (isNowStreaming) {
+      // Live streaming chunk — only follow if already near the bottom
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      if (distFromBottom < 120) scroll()
+    }
   }, [messages])
+
+  // Show/hide scroll-to-bottom button
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const onScroll = () => {
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      setShowScrollBtn(distFromBottom > 120)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
 
   // Auto-resize textarea: 1 line by default, grows up to 5 lines.
   // useLayoutEffect fires synchronously before paint — no visible flash or jump.
@@ -1169,7 +1409,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     setIsListening(false)
   }, [])
 
-  // ── Image reading (shared by drag-drop + paste + file picker) ────────────
+  // ── Image reading (drag-drop + file picker — NOT clipboard paste) ────────
   const readImageFiles = useCallback((files: File[]) => {
     const remaining = MAX_IMAGES - attachedImages.length
     if (remaining <= 0) { setFileError(`Maximum ${MAX_IMAGES} images allowed`); return }
@@ -1183,12 +1423,11 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
       if (file.size > MAX_IMAGE_SIZE) {
         setFileError(`"${file.name}" is too large (max 5 MB)`); return
       }
+      const mimeType = file.type as ImageMimeType
       const reader = new FileReader()
       reader.onload = (e) => {
-        const dataUrl  = e.target?.result as string
-        // dataUrl format: "data:<mimeType>;base64,<data>"
-        const base64   = dataUrl.split(',')[1]
-        const mimeType = file.type as ImageMimeType
+        const dataUrl = e.target?.result as string
+        const base64  = dataUrl.split(',')[1]
         setAttachedImages(prev => {
           if (prev.some(img => img.name === file.name && img.size === file.size)) return prev
           return [...prev, {
@@ -1207,31 +1446,36 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   }, [attachedImages.length])
 
   // ── Paste images from clipboard ───────────────────────────────────────────
+  // Clipboard File objects are unreliable in Electron — we ask the main process
+  // to read the image via the native `clipboard` module instead.
   useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     const handlePaste = (e: ClipboardEvent) => {
       const items = Array.from(e.clipboardData?.items ?? [])
-      const imageItems = items.filter(item => item.type.startsWith('image/'))
-      if (imageItems.length === 0) return
-      // Prevent pasting the image as text
+      const hasImage = items.some(item => item.type.startsWith('image/'))
+      if (!hasImage || !isElectron) return
       e.preventDefault()
-      const imageFiles = imageItems
-        .map(item => item.getAsFile())
-        .filter((f): f is File => f !== null)
-        .map((f, i) => {
-          // Clipboard images often have no name — give them one
-          if (!f.name || f.name === 'image.png') {
-            const ext = f.type.split('/')[1] ?? 'png'
-            return new File([f], `paste-${Date.now()}-${i}.${ext}`, { type: f.type })
-          }
-          return f
+
+      window.api.clipboardReadImage().then(result => {
+        if (!result) { setFileError('No image found in clipboard'); return }
+        const { dataUrl, base64, size } = result
+        setAttachedImages(prev => {
+          if (prev.length >= MAX_IMAGES) { setFileError(`Maximum ${MAX_IMAGES} images allowed`); return prev }
+          return [...prev, {
+            id:         `img-${Date.now()}`,
+            name:       'Screenshot',
+            mimeType:   'image/png',
+            data:       base64,
+            previewUrl: dataUrl,
+            size
+          }]
         })
-      if (imageFiles.length > 0) readImageFiles(imageFiles)
+      }).catch(() => setFileError('Failed to read clipboard image'))
     }
     textarea.addEventListener('paste', handlePaste)
     return () => textarea.removeEventListener('paste', handlePaste)
-  }, [readImageFiles])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Token / cost stats ───────────────────────────────────────────────────
   const allFileContent = [
@@ -1302,9 +1546,31 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
 
     setInput(val)
 
+    const textBefore = val.slice(0, cursor)
+
+    // ── Slash command detection ───────────────────────────────────────────
+    const slashIdx = textBefore.lastIndexOf('/')
+    if (slashIdx >= 0) {
+      const charBefore = slashIdx > 0 ? textBefore[slashIdx - 1] : ' '
+      const isBoundary = /[\s]/.test(charBefore) || slashIdx === 0
+      if (isBoundary) {
+        const query = textBefore.slice(slashIdx + 1)
+        if (!query.includes(' ') && !query.includes('\n')) {
+          if (filterSlashCommands(query).length > 0) {
+            setSlashQuery(query)
+            setSlashAnchor(slashIdx)
+            setSlashActiveIdx(0)
+            setMentionQuery(null)
+            return
+          }
+        }
+      }
+    }
+    setSlashQuery(null)
+
+    // ── @-mention detection ───────────────────────────────────────────────
     // Look for the last '@' before the cursor (not preceded by a word char — ensures
     // we only activate on a freshly typed '@', not mid-word)
-    const textBefore = val.slice(0, cursor)
     const atIdx = textBefore.lastIndexOf('@')
 
     if (atIdx >= 0) {
@@ -1330,6 +1596,14 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     // No active mention
     setMentionQuery(null)
   }, [mentionFiles.length, settings.workspacePath, loadMentionFiles])
+
+  // ── Slash command: select handler ─────────────────────────────────────────
+  const handleSlashSelect = useCallback((cmd: SlashCommand) => {
+    // Replace the /query text with the command's prompt
+    setInput(prev => prev.slice(0, slashAnchor) + cmd.prompt + prev.slice(slashAnchor + 1 + (slashQuery?.length ?? 0)))
+    setSlashQuery(null)
+    setTimeout(() => textareaRef.current?.focus(), 0)
+  }, [slashAnchor, slashQuery])
 
   // ── @-mention: file selected ─────────────────────────────────────────────
   const handleMentionSelect = useCallback(async (filePath: string) => {
@@ -1428,13 +1702,31 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     // Build image attachments (strip preview-only fields)
     const images: ImageAttachment[] = attachedImages.map(({ mimeType, data }) => ({ mimeType, data }))
 
+    // ── Pre-fetch detected URLs ───────────────────────────────────────────
+    // Fetch via main-process net.fetch (bypasses CORS). Content is stored
+    // in urlFetches on the ChatMessage — shown as collapsed cards in the UI
+    // and injected into the AI's copy of the message automatically.
+    let urlFetches: import('../../../shared/types').UrlFetch[] = []
+    if (isElectron && detectedUrls.length > 0) {
+      const results = await Promise.all(
+        detectedUrls.map(async (url) => {
+          try {
+            const result = await window.api.fetchUrlContent(url)
+            if (result.ok && result.content) return { url, content: result.content }
+          } catch { /* best-effort */ }
+          return null
+        })
+      )
+      urlFetches = results.filter((r): r is import('../../../shared/types').UrlFetch => r !== null)
+    }
+
     setInput('')
     try { localStorage.removeItem(`draft-${conversation?.id ?? 'new'}`) } catch { /* ignore */ }
     setAttachedFiles([])
     setMentionChips([])
     setAttachedImages([])
     setUrlBannerDismissed(false)
-    await sendMessage(fullMessage, images.length > 0 ? images : undefined)
+    await sendMessage(fullMessage, images.length > 0 ? images : undefined, urlFetches.length > 0 ? urlFetches : undefined)
   }
 
   // ── Branch conversation at a message ─────────────────────────────────────
@@ -1451,22 +1743,51 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     const title = `⎇ ${baseTitle}${baseTitle.length >= 42 ? '…' : ''}`
 
     const branchedConv: Conversation = {
-      id:        newConvId,
+      id:                   newConvId,
       title,
-      messages:  branchedMessages,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      provider:  effectiveSettings.provider,
-      model:     effectiveSettings.model
+      messages:             branchedMessages,
+      createdAt:            Date.now(),
+      updatedAt:            Date.now(),
+      provider:             effectiveSettings.provider,
+      model:                effectiveSettings.model,
+      workspacePath:        convWorkspace,           // preserve workspace folder
+      mode:                 conversation?.mode,       // preserve chat mode
+      parentConversationId: conversation?.id,         // record where this fork came from
+      branchFromMessageId:  messageId,               // record the fork point
     }
 
     if (isElectron) await window.api.saveConversation(branchedConv)
-    // onConversationUpdate also tells App to switch to this conversation
+    // onConversationUpdate adds the conv to the list and navigates to it
     onConversationUpdate(branchedConv)
-  }, [messages, effectiveSettings, onConversationUpdate])
+  }, [messages, effectiveSettings, convWorkspace, conversation, onConversationUpdate])
 
   // ── Keyboard in textarea ──────────────────────────────────────────────────
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // ── Slash command navigation ────────────────────────────────────────────
+    if (slashQuery !== null) {
+      const cmds = filterSlashCommands(slashQuery)
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashActiveIdx(i => Math.min(i + 1, cmds.length - 1))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashActiveIdx(i => Math.max(i - 1, 0))
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        if (cmds[slashActiveIdx]) handleSlashSelect(cmds[slashActiveIdx])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashQuery(null)
+        return
+      }
+    }
+
     // When mention dropdown is open, let FileMentionDropdown handle nav keys
     // (its capture-phase listener fires before this and calls e.stopPropagation)
     if (mentionQuery !== null && ['ArrowDown', 'ArrowUp', 'Tab', 'Escape'].includes(e.key)) {
@@ -1552,30 +1873,37 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div
+      ref={panelRef}
       className="flex flex-col h-full bg-gray-50 dark:bg-gray-950 relative"
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      {/* Mode tab bar */}
-      <ModeTabBar mode={mode} onChange={handleModeChange} disabled={isStreaming} />
-
-      {/* Header / drag region */}
+      {/* Row 1 — drag handle (sits at same height as the native titlebar overlay, so keep it empty/clean) */}
       <div
-        className="h-9 flex items-center justify-between px-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 flex-shrink-0"
+        className="h-9 flex items-center px-4 bg-white dark:bg-gray-950 flex-shrink-0"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
-        {/* Left side — .chatui badge only (model moved to bottom bar) */}
-        <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          {projectConfig && (
+        {/* intentionally empty — this row is purely a window-drag target */}
+      </div>
+
+      {/* Row 2 — mode tabs (left) + toolbar (right) — responsive */}
+      <div
+        className="flex items-center justify-between px-3 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 flex-shrink-0 min-w-0"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        {/* Left: mode tabs + optional .chatui badge */}
+        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <ModeTabBar mode={mode} onChange={handleModeChange} disabled={isStreaming} inline compact={headerCompact} />
+          {projectConfig && !headerMinimal && (
             <span
               title={[
                 projectConfig.model         ? `Model: ${projectConfig.model}`              : null,
                 projectConfig.disabledTools?.length ? `Disabled: ${projectConfig.disabledTools.join(', ')}` : null,
                 projectConfig.rules?.length ? `${projectConfig.rules.length} rule(s)`      : null,
               ].filter(Boolean).join('\n') || '.chatui config active'}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono flex-shrink-0
                          bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400
                          border border-emerald-200 dark:border-emerald-700 cursor-default select-none"
             >
@@ -1586,148 +1914,198 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
               .chatui
             </span>
           )}
+
+          {/* ── Branch origin pill — shown when this conversation is a fork ── */}
+          {conversation?.parentConversationId && !headerMinimal && (
+            <button
+              onClick={() => onNavigateTo?.(conversation.parentConversationId!)}
+              title="Go back to parent conversation"
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono flex-shrink-0
+                         bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400
+                         border border-purple-200 dark:border-purple-700
+                         hover:bg-purple-100 dark:hover:bg-purple-800/40 transition-colors cursor-pointer select-none"
+            >
+              <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round"
+                  d="M6 3v12m0 0a3 3 0 100 6 3 3 0 000-6zm0 0h8m0 0a3 3 0 100 6 3 3 0 000-6m0-12a3 3 0 100-6 3 3 0 000 6m0 6V9" />
+              </svg>
+              fork ↩
+            </button>
+          )}
         </div>
 
-        {/* Right-side header actions (marked no-drag) */}
-        <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          {/* Token / cost pill */}
+        {/* Right: toolbar — collapses to overflow ⋯ when very narrow */}
+        <div ref={hdrRightRef} className="flex items-center gap-0.5 flex-shrink-0 ml-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+
+          {/* Token/cost — full pill when wide, $ icon when compact */}
           {sessionTotalTokens > 0 && (
-            <span className="text-[10px] text-gray-400 dark:text-gray-600 px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800">
-              ~{formatTokens(sessionTotalTokens)} tokens
-              {showCost && <> · {formatCost(sessionCost)}</>}
-            </span>
+            headerCompact ? (
+              <span
+                title={`~${formatTokens(sessionTotalTokens)} tokens${showCost ? ` · ${formatCost(sessionCost)}` : ''}`}
+                className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 text-[11px] font-semibold cursor-default select-none hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                $
+              </span>
+            ) : (
+              <span className="text-[10px] text-gray-400 dark:text-gray-600 px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 whitespace-nowrap">
+                ~{formatTokens(sessionTotalTokens)} tokens{showCost && <> · {formatCost(sessionCost)}</>}
+              </span>
+            )
           )}
-          {/* Template picker */}
+
+          {/* Primary tools — always visible, icon-only when compact */}
           {onSettingsUpdate && (
             <QuickTemplateMenu
               currentPrompt={settings.systemPrompt}
-              onApply={(prompt) => {
-                const next = { ...settings, systemPrompt: prompt }
-                onSettingsUpdate(next)
-              }}
+              onApply={(prompt) => { const next = { ...settings, systemPrompt: prompt }; onSettingsUpdate(next) }}
+              compact={headerCompact}
             />
           )}
-          {/* Project Summary */}
-          {settings.workspacePath && (
-            <button
-              onClick={() => setSummaryOpen(true)}
-              title="Project Summary — export to Claude, Cursor, ChatGPT…"
-              className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
-            >
-              <span className="text-base leading-none">📄</span>
+          <ExportMenu title={convTitle} messages={messages} conversation={conversation} disabled={messages.length === 0} compact={headerCompact} />
+
+          {/* Secondary tools — visible when not minimal, otherwise in overflow */}
+          {!headerMinimal && (<>
+            {settings.workspacePath && (
+              <button onClick={() => setSummaryOpen(true)} title="Project Summary"
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors">
+                <span className="text-base leading-none">📄</span>
+              </button>
+            )}
+            {settings.workspacePath && (
+              <button onClick={() => setPinsOpen(true)} title="Pinned Context Files"
+                className="relative w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/30 transition-colors">
+                <span className="text-base leading-none">📌</span>
+                {pinsCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-orange-500 text-white text-[8px] font-bold flex items-center justify-center leading-none">{pinsCount}</span>
+                )}
+              </button>
+            )}
+            {settings.workspacePath && (
+              <button onClick={() => setMemoryOpen(true)} title="Project Memory"
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/30 transition-colors">
+                <span className="text-base leading-none">🧠</span>
+              </button>
+            )}
+            <button onClick={() => onOpenEditor?.()} title="Code Editor"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+              </svg>
             </button>
-          )}
-          {/* Pinned files */}
-          {settings.workspacePath && (
-            <button
-              onClick={() => setPinsOpen(true)}
-              title="Pinned Context Files — always in AI system prompt"
-              className="relative w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/30 transition-colors"
-            >
-              <span className="text-base leading-none">📌</span>
-              {pinsCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-orange-500 text-white text-[8px] font-bold flex items-center justify-center leading-none">
-                  {pinsCount}
-                </span>
+            <button onClick={() => setTestRunnerOpen(true)} title="Test Runner"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-violet-500 hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors">
+              <span className="text-base leading-none">🧪</span>
+            </button>
+            <button onClick={() => setDbBrowserOpen(true)} title="Database Browser"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 transition-colors">
+              <span className="text-base leading-none">🗄️</span>
+            </button>
+            <button onClick={() => setQueueOpen(v => !v)} title="Task Queue"
+              className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${queueOpen ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30' : 'text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30'}`}>
+              <span className="text-base leading-none">📋</span>
+            </button>
+            {messages.length > 0 && (
+              <button
+                onClick={() => setAuditOpen(true)}
+                title="Session Audit Log — replay every step the AI took"
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round"
+                    d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" />
+                </svg>
+              </button>
+            )}
+            {pluginsCount > 0 && (
+              <span title={`${pluginsCount} plugin${pluginsCount !== 1 ? 's' : ''}`}
+                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-700 cursor-default select-none">
+                🔌{pluginsCount}
+              </span>
+            )}
+            {ragChunks > 0 && (
+              <span title={`RAG: ${ragChunks} chunks`}
+                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-teal-50 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400 border border-teal-200 dark:border-teal-700 cursor-default select-none">
+                🔍{ragChunks}
+              </span>
+            )}
+          </>)}
+
+          {/* Overflow ⋯ — only in minimal mode, contains all secondary tools */}
+          {headerMinimal && (
+            <div ref={overflowRef} className="relative">
+              <button
+                onClick={() => setOverflowOpen(v => !v)}
+                title="More tools"
+                className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${
+                  overflowOpen
+                    ? 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200'
+                    : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                  <circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>
+                </svg>
+              </button>
+              {overflowOpen && (
+                <div className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl z-[60] w-52 py-1 overflow-hidden">
+                  {settings.workspacePath && (
+                    <button onClick={() => { setSummaryOpen(true); setOverflowOpen(false) }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                      <span>📄</span><span>Project Summary</span>
+                    </button>
+                  )}
+                  {settings.workspacePath && (
+                    <button onClick={() => { setPinsOpen(true); setOverflowOpen(false) }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                      <span>📌</span><span>Pinned Files {pinsCount > 0 && `(${pinsCount})`}</span>
+                    </button>
+                  )}
+                  {settings.workspacePath && (
+                    <button onClick={() => { setMemoryOpen(true); setOverflowOpen(false) }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                      <span>🧠</span><span>Project Memory</span>
+                    </button>
+                  )}
+                  <button onClick={() => { onOpenEditor?.(); setOverflowOpen(false) }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                    </svg>
+                    <span>Code Editor</span>
+                  </button>
+                  <button onClick={() => { setTestRunnerOpen(true); setOverflowOpen(false) }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                    <span>🧪</span><span>Test Runner</span>
+                  </button>
+                  <button onClick={() => { setDbBrowserOpen(true); setOverflowOpen(false) }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                    <span>🗄️</span><span>Database Browser</span>
+                  </button>
+                  <button onClick={() => { setQueueOpen(v => !v); setOverflowOpen(false) }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                    <span>📋</span><span>Task Queue</span>
+                  </button>
+                  {pluginsCount > 0 && (
+                    <div className="px-3 py-2 text-xs text-violet-600 dark:text-violet-400">
+                      🔌 {pluginsCount} plugin{pluginsCount !== 1 ? 's' : ''} active
+                    </div>
+                  )}
+                  {ragChunks > 0 && (
+                    <div className="px-3 py-2 text-xs text-teal-600 dark:text-teal-400">
+                      🔍 RAG — {ragChunks} chunk{ragChunks !== 1 ? 's' : ''} injected
+                    </div>
+                  )}
+                </div>
               )}
-            </button>
+            </div>
           )}
-          {/* Memory */}
-          {settings.workspacePath && (
-            <button
-              onClick={() => setMemoryOpen(true)}
-              title="Project Memory"
-              className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/30 transition-colors"
-            >
-              <span className="text-base leading-none">🧠</span>
-            </button>
-          )}
-          {/* Task Queue */}
-          <button
-            onClick={() => setQueueOpen(v => !v)}
-            title="Task Queue — run multiple prompts sequentially"
-            className={`relative w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${
-              queueOpen
-                ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30'
-                : 'text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30'
-            }`}
-          >
-            <span className="text-base leading-none">📋</span>
-          </button>
-          {/* Custom plugins badge */}
-          {pluginsCount > 0 && (
-            <span
-              title={`${pluginsCount} custom tool plugin${pluginsCount !== 1 ? 's' : ''} loaded from .ai-context/tools/`}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono
-                         bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400
-                         border border-violet-200 dark:border-violet-700 cursor-default select-none"
-            >
-              🔌 {pluginsCount}
-            </span>
-          )}
-          {/* RAG indicator */}
-          {ragChunks > 0 && (
-            <span
-              title={`RAG: ${ragChunks} relevant code chunk${ragChunks !== 1 ? 's' : ''} auto-injected into context`}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono
-                         bg-teal-50 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400
-                         border border-teal-200 dark:border-teal-700"
-            >
-              🔍 RAG {ragChunks}
-            </span>
-          )}
-          {/* Export */}
-          <ExportMenu
-            title={convTitle}
-            messages={messages}
-            disabled={messages.length === 0}
-          />
         </div>
       </div>
 
       {/* Messages + Agent progress sidebar */}
       <div className="flex flex-1 overflow-hidden min-h-0">
-        <div
-          className="flex-1 overflow-y-auto px-4 py-6"
-          role="log"
-          aria-label="Conversation messages"
-          aria-live="polite"
-          aria-atomic="false"
-        >
-          {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-600 select-none">
-              <div className="text-4xl mb-3">{mode === 'agent' ? '⚡' : '✦'}</div>
-              <p className="text-lg font-medium text-gray-500 dark:text-gray-400">
-                {mode === 'agent' ? 'Give the agent a goal' : 'How can I help you?'}
-              </p>
-              <p className="text-sm mt-1">
-                {noApiKey
-                  ? <span className="text-yellow-500">⚠ Configure your API key in Settings first</span>
-                  : mode === 'agent'
-                    ? <span className="text-gray-400 dark:text-gray-600">Describe what you want built — the agent will plan and execute autonomously</span>
-                    : <span className="text-gray-400 dark:text-gray-600">Type a message, paste/drop images, or type @ to mention a file</span>
-                }
-              </p>
-            </div>
-          ) : (
-            <MessageList
-              messages={messages}
-              settings={settings}
-              isStreaming={isStreaming}
-              messagesEndRef={messagesEndRef}
-              editMessage={editMessage}
-              handleBranch={handleBranch}
-              rateMessage={rateMessage}
-              setEditorFile={setEditorFile}
-              onOpenSettings={onOpenSettings}
-              activeWorkspace={activeWorkspace}
-            />
-          )}
-        </div>
-
-        {/* Mode-specific sidebars */}
-        {mode === 'agent' && messages.length > 0 && (
-          <AgentProgressPanel
+        {mode === 'agent' && messages.length > 0 ? (
+          <AgentView
             messages={messages}
             isStreaming={isStreaming}
             autoContinueCount={autoContinueCount}
@@ -1736,7 +2114,67 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
             onPause={pauseAgent}
             onResume={resumeAgent}
             onStop={abortStream}
+            onSendMessage={sendMessage}
           />
+        ) : (
+          <div className="relative flex-1 min-h-0 flex flex-col">
+            <div
+              ref={scrollContainerRef}
+              className="flex-1 overflow-y-auto px-4 py-6"
+              role="log"
+              aria-label="Conversation messages"
+              aria-live="polite"
+              aria-atomic="false"
+            >
+              {messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-600 select-none">
+                  <div className="text-4xl mb-3">{mode === 'agent' ? '⚡' : '✦'}</div>
+                  <p className="text-lg font-medium text-gray-500 dark:text-gray-400">
+                    {mode === 'agent' ? 'Give the agent a goal' : 'How can I help you?'}
+                  </p>
+                  <p className="text-sm mt-1">
+                    {noApiKey
+                      ? <span className="text-yellow-500">⚠ Configure your API key in Settings first</span>
+                      : mode === 'agent'
+                        ? <span className="text-gray-400 dark:text-gray-600">Describe what you want built — the agent will plan and execute autonomously</span>
+                        : <span className="text-gray-400 dark:text-gray-600">Type a message, paste/drop images, or type @ to mention a file</span>
+                    }
+                  </p>
+                </div>
+              ) : (
+                <MessageList
+                  messages={messages}
+                  settings={settings}
+                  isStreaming={isStreaming}
+                  messagesEndRef={messagesEndRef}
+                  editMessage={editMessage}
+                  handleBranch={handleBranch}
+                  rateMessage={rateMessage}
+                  setEditorFile={setEditorFile}
+                  onOpenSettings={onOpenSettings}
+                  activeWorkspace={activeWorkspace}
+                  scrollToMsgId={scrollToMsgId}
+                  onScrollConsumed={() => setScrollToMsgId(undefined)}
+                />
+              )}
+            </div>
+
+            {/* Scroll-to-bottom floating button */}
+            {showScrollBtn && (
+              <button
+                onClick={() => {
+                  scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
+                }}
+                className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center justify-center w-9 h-9 rounded-full bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 shadow-lg text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-150"
+                title="Scroll to latest"
+                aria-label="Scroll to latest message"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+            )}
+          </div>
         )}
         {mode === 'review' && (
           <ReviewPanel
@@ -1919,6 +2357,17 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
           />
         )}
 
+        {/* Slash-command menu — rendered above input area */}
+        {slashQuery !== null && (
+          <SlashCommandMenu
+            query={slashQuery}
+            onSelect={handleSlashSelect}
+            onClose={() => setSlashQuery(null)}
+            activeIndex={slashActiveIdx}
+            onActiveIndexChange={setSlashActiveIdx}
+          />
+        )}
+
         {/* File error */}
         {fileError && (
           <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-xs text-red-600 dark:text-red-400">
@@ -2025,8 +2474,8 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
             placeholder={
               noApiKey           ? 'Configure your API key in Settings first…' :
               totalChipCount > 0 ? 'Add a message… (optional)  ·  Paste more images or type @' :
-              activeWorkspace    ? 'Message AI…  ·  Paste or drag images  ·  Type @ to mention a file  ·  Enter ↵ to send' :
-              'Message AI…  ·  Paste or drag images  ·  Enter ↵ to send, Shift+Enter for newline'
+              activeWorkspace    ? 'Message AI…  ·  Type / for commands  ·  @ to mention a file  ·  Enter ↵ to send' :
+              'Message AI…  ·  Type / for commands  ·  Enter ↵ to send, Shift+Enter for newline'
             }
             disabled={noApiKey}
             rows={1}
@@ -2053,156 +2502,157 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
         </div>
 
         {/* Bottom bar — three columns: left | center | right */}
-        <div className="flex items-center mt-2 px-1 gap-2">
+        <div className="flex items-center mt-2 px-1 gap-2 min-w-0">
 
-          {/* Left: folder picker + approve-edits toggle */}
-          <div className="flex items-center gap-1.5 flex-shrink-0">
+          {/* Left: folder + approve toggles — icon-only when compact, overflow when minimal */}
+          <div className="flex items-center gap-1 flex-shrink-0">
 
-            {/* Folder chip — shows active folder or "Add folder" button */}
+            {/* Folder chip */}
             {isElectron && (
               convWorkspace ? (
-                <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300 max-w-[200px]">
-                  {/* folder icon */}
-                  <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
-                  </svg>
-                  <button
-                    onClick={handlePickFolder}
-                    title={`Workspace: ${convWorkspace}\nClick to change folder`}
-                    className="truncate hover:text-violet-900 dark:hover:text-violet-100 transition-colors"
-                  >
-                    {String(convWorkspace).split(/[\\/]/).pop()}
+                <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300">
+                  <button onClick={handlePickFolder} title={`Workspace: ${convWorkspace}\nClick to change`}
+                    className="flex items-center gap-1 hover:text-violet-900 dark:hover:text-violet-100 transition-colors">
+                    <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                    </svg>
                   </button>
-                  <button
-                    onClick={handleClearFolder}
-                    title="Remove folder from this chat"
-                    className="flex-shrink-0 ml-0.5 text-violet-400 hover:text-violet-700 dark:hover:text-violet-200 transition-colors"
-                  >
+                  <button onClick={handleClearFolder} title="Remove folder"
+                    className="flex-shrink-0 text-violet-400 hover:text-violet-700 dark:hover:text-violet-200 transition-colors">
                     <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
                       <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
                   </button>
                 </div>
               ) : (
-                <button
-                  onClick={handlePickFolder}
-                  title="Add a folder — AI tools will be restricted to this folder"
-                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                  className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium text-gray-400 dark:text-gray-600 border border-dashed border-gray-300 dark:border-gray-700 hover:text-violet-600 dark:hover:text-violet-400 hover:border-violet-400 dark:hover:border-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-all"
-                >
-                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <button onClick={handlePickFolder}
+                  title="Add workspace folder — AI tools restricted to this folder"
+                  className={`flex items-center gap-1 py-1 rounded-md text-xs font-medium text-gray-400 dark:text-gray-600 border border-dashed border-gray-300 dark:border-gray-700 hover:text-violet-600 dark:hover:text-violet-400 hover:border-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-all ${bottomCompact ? 'px-1.5' : 'px-2'}`}>
+                  <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                     <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
                   </svg>
-                  Add folder
+                  {!bottomCompact && <span>Add folder</span>}
                 </button>
               )
             )}
 
-            {/* Approve-edits toggle — only when a workspace folder is active */}
+            {/* Approve-edits toggle — icon-only when compact */}
             {onSettingsUpdate && activeWorkspace && (
               <button
                 onClick={() => onSettingsUpdate({ ...settings, requireEditApproval: settings.requireEditApproval === false ? true : false })}
-                title={settings.requireEditApproval !== false
-                  ? 'Edit approval ON — AI will show a diff and ask before writing files. Click to disable.'
-                  : 'Edit approval OFF — AI writes files without asking. Click to enable.'}
-                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-all border
+                title={settings.requireEditApproval !== false ? 'Edit approval ON — click to disable' : 'Auto-write ON — click to require approval'}
+                className={`flex items-center gap-1 py-1 rounded-md text-xs font-medium transition-all border ${bottomCompact ? 'px-1.5' : 'px-2 gap-1.5'}
                   ${settings.requireEditApproval !== false
-                    ? 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/40'
+                    ? 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100'
                     : 'text-gray-400 dark:text-gray-600 bg-transparent border-transparent hover:bg-gray-100 dark:hover:bg-gray-800 hover:border-gray-200 dark:hover:border-gray-700'
                   }`}
               >
                 <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                 </svg>
-                <span>{settings.requireEditApproval !== false ? 'Approve edits' : 'Auto-write'}</span>
+                {!bottomCompact && <span>{settings.requireEditApproval !== false ? 'Approve edits' : 'Auto-write'}</span>}
               </button>
             )}
 
-            {/* Approve-commands toggle — only when a workspace folder is active */}
+            {/* Approve-commands toggle — icon-only when compact */}
             {onSettingsUpdate && activeWorkspace && (
               <button
                 onClick={() => onSettingsUpdate({ ...settings, autoApproveCommands: !settings.autoApproveCommands })}
-                title={settings.autoApproveCommands
-                  ? 'Commands: auto-run ON — safe commands execute without asking. Click to require approval.'
-                  : 'Commands: approval ON — AI must ask before running any command. Click to auto-run.'}
-                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-all border
+                title={settings.autoApproveCommands ? 'Auto-run cmds ON — click to require approval' : 'Approve cmds — click to auto-run'}
+                className={`flex items-center gap-1 py-1 rounded-md text-xs font-medium transition-all border ${bottomCompact ? 'px-1.5' : 'px-2 gap-1.5'}
                   ${settings.autoApproveCommands
-                    ? 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800 hover:bg-orange-100 dark:hover:bg-orange-900/40'
-                    : 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/40'
+                    ? 'text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800 hover:bg-orange-100'
+                    : 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100'
                   }`}
               >
                 <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                   <rect x="3" y="3" width="18" height="18" rx="2"/><polyline points="9 9 9 15"/><polyline points="9 12 15 12"/>
                 </svg>
-                <span>{settings.autoApproveCommands ? 'Auto-run cmds' : 'Approve cmds'}</span>
+                {!bottomCompact && <span>{settings.autoApproveCommands ? 'Auto-run cmds' : 'Approve cmds'}</span>}
               </button>
             )}
           </div>
 
-          {/* Center: quick action buttons — only when there are messages and input is empty */}
-          <div className="flex-1 flex items-center justify-center gap-1 min-w-0">
+          {/* Center: quick action buttons — icon-only when compact */}
+          <div className="flex-1 flex items-center justify-center gap-1 min-w-0 overflow-hidden">
             {quickActions.length > 0 && input.trim() === '' && totalChipCount === 0 && !isStreaming && (
               quickActions.map((action) => (
                 <button
                   key={action.label}
-                  onClick={() => {
-                    setInput(action.prompt)
-                    setTimeout(() => textareaRef.current?.focus(), 0)
-                  }}
+                  onClick={() => { setInput(action.prompt); setTimeout(() => textareaRef.current?.focus(), 0) }}
                   title={action.label}
-                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium
-                             text-gray-400 dark:text-gray-600
-                             border border-transparent
-                             hover:text-blue-600 dark:hover:text-blue-400
-                             hover:bg-blue-50 dark:hover:bg-blue-900/20
-                             hover:border-blue-200 dark:hover:border-blue-800
-                             transition-colors group"
+                  className={`flex items-center gap-1 rounded-md text-xs font-medium text-gray-400 dark:text-gray-600 border border-transparent hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-200 dark:hover:border-blue-800 transition-colors flex-shrink-0 ${bottomCompact ? 'w-7 h-7 justify-center' : 'px-2 py-1 whitespace-nowrap'}`}
                 >
                   <span className="text-sm leading-none flex-shrink-0">{action.icon}</span>
-                  {/* Label hidden on narrow widths */}
-                  <span className="hidden sm:inline truncate">{action.label}</span>
+                  {!bottomCompact && <span className="truncate">{action.label}</span>}
                 </button>
               ))
             )}
           </div>
 
           {/* Right: model picker + reasoning depth + token hint */}
-          <div className="flex items-center gap-1 flex-shrink-0">
-            {/* Token / attach hint */}
-            <p className="text-xs text-gray-400 dark:text-gray-600 mr-1">
-              {input.length > 0 || attachedImages.length > 0
-                ? `~${formatTokens(inputTokens)} tokens`
-                : totalChipCount > 0
-                  ? `${totalChipCount} attached`
-                  : null
-              }
-            </p>
+          <div ref={btmRightRef} className="flex items-center gap-1 flex-shrink-0">
+            {/* Token / attach hint — $ icon when compact, full text when wide */}
+            {(input.length > 0 || attachedImages.length > 0 || totalChipCount > 0) && (
+              bottomCompact ? (
+                <span
+                  title={
+                    input.length > 0 || attachedImages.length > 0
+                      ? `~${formatTokens(inputTokens)} tokens`
+                      : `${totalChipCount} attached`
+                  }
+                  className="w-6 h-6 flex items-center justify-center text-[11px] font-semibold text-gray-400 cursor-default select-none"
+                >
+                  $
+                </span>
+              ) : (
+                <p className="text-xs text-gray-400 dark:text-gray-600">
+                  {input.length > 0 || attachedImages.length > 0
+                    ? `~${formatTokens(inputTokens)} tokens`
+                    : `${totalChipCount} attached`
+                  }
+                </p>
+              )
+            )}
+            {/* Clear — × icon when compact */}
             {totalChipCount > 0 && (
-              <button
-                onClick={() => { setAttachedFiles([]); setMentionChips([]); setAttachedImages([]) }}
-                className="text-xs text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors mr-1"
-              >
-                Clear
-              </button>
+              bottomCompact ? (
+                <button
+                  onClick={() => { setAttachedFiles([]); setMentionChips([]); setAttachedImages([]) }}
+                  title="Clear attachments"
+                  className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-red-500 transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setAttachedFiles([]); setMentionChips([]); setAttachedImages([]) }}
+                  className="text-xs text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors"
+                >
+                  Clear
+                </button>
+              )
             )}
 
-            {/* Reasoning depth — only shown for supported models */}
+            {/* Reasoning depth — icon only when compact */}
             {onSettingsUpdate && (
               <ReasoningDepthPicker
                 provider={effectiveSettings.provider}
                 model={effectiveSettings.model}
                 depth={(effectiveSettings.reasoningDepth ?? 'off') as 'off' | 'low' | 'medium' | 'high'}
                 onChange={(d) => onSettingsUpdate({ ...settings, reasoningDepth: d })}
+                compact={bottomCompact}
               />
             )}
 
-            {/* Model picker pill — opens upward */}
+            {/* Model picker — icon only when compact */}
             {onSettingsUpdate ? (
               <ModelPicker
                 settings={effectiveSettings}
                 openUp
+                compact={bottomCompact}
                 onApply={(model, provider) => {
                   const baseUrl = PROVIDER_BASE_URLS[provider] ?? settings.baseUrl
                   onSettingsUpdate({ ...settings, model, provider, baseUrl })
@@ -2219,7 +2669,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
               </span>
             )}
 
-            {/* Context usage circle — right of model picker */}
+            {/* Context usage circle — always visible */}
             <ContextCircle settings={effectiveSettings} messages={messages} />
           </div>
         </div>
@@ -2288,6 +2738,43 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
             }, 0)
           }}
           onClose={() => setQueueOpen(false)}
+        />
+      )}
+
+      {/* Test Runner modal */}
+      {testRunnerOpen && (
+        <TestRunnerPanel
+          workspacePath={activeWorkspace}
+          onClose={() => setTestRunnerOpen(false)}
+          onAutoFix={(prompt) => {
+            setTestRunnerOpen(false)
+            sendMessage(prompt)
+          }}
+        />
+      )}
+
+      {/* Database Browser modal */}
+      {dbBrowserOpen && (
+        <DatabaseBrowserPanel
+          workspacePath={activeWorkspace}
+          defaultConnStr={settings.dbConnectionString ?? ''}
+          onClose={() => setDbBrowserOpen(false)}
+          onAskAI={(prompt) => {
+            setDbBrowserOpen(false)
+            sendMessage(prompt)
+          }}
+        />
+      )}
+
+      {/* Session Audit Log modal */}
+      {auditOpen && conversation && (
+        <SessionReplayPanel
+          conversation={conversation}
+          onClose={() => setAuditOpen(false)}
+          onJumpTo={(msgId) => {
+            setAuditOpen(false)
+            setScrollToMsgId(msgId)
+          }}
         />
       )}
     </div>

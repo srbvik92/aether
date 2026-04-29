@@ -14,7 +14,8 @@ import {
   SessionChangesPayload,
   ToolCallDisplay,
   ImageAttachment,
-  CmdApprovalPayload
+  CmdApprovalPayload,
+  DiffAttachPayload
 } from '../../../shared/types'
 
 function genId(): string {
@@ -80,10 +81,14 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
   const [messages,      setMessages]      = useState<ChatMessage[]>(sanitiseLoadedMessages(conversation?.messages ?? []))
   const [isStreaming,   setIsStreaming]   = useState(false)
   const [isCompressing, setIsCompressing] = useState(false)
-  const [activeConvId,  setActiveConvId]  = useState<string | null>(conversation?.id ?? null)
+  // Always initialise with a real ID — for new chats we pre-generate one so
+  // activeConvId never changes when the first message is sent (which would tear
+  // down and re-register all stream listeners mid-flight, dropping every chunk).
+  const [activeConvId,  setActiveConvId]  = useState<string>(() => conversation?.id ?? genId())
 
-  const streamingIdRef  = useRef<string | null>(null)
-  const autoTitledRef   = useRef(false)
+  const streamingIdRef      = useRef<string | null>(null)
+  const autoTitledRef       = useRef(false)
+  const streamSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [customTitle,   setCustomTitle]   = useState<string | null>(null)
 
   // ── Agent mode auto-continue state ────────────────────────────────────────
@@ -95,14 +100,26 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
   const modeRef = useRef(mode)
   modeRef.current = mode
 
-  // Reset state when switching conversations; sanitise any stale "running" tool calls
+  // Reset state when switching conversations; sanitise any stale "running" tool calls.
+  // IMPORTANT: skip the reset when the incoming conversation.id is the same as the
+  // id we already pre-generated for this new chat.  That happens when the first
+  // message of a brand-new chat triggers onConversationUpdate → setActiveConvId in
+  // App.tsx, which causes the conversation prop to go from null → saved conv.
+  // We do NOT want to wipe streaming state in that case — it's the same chat.
   useEffect(() => {
+    if (conversation?.id && conversation.id === activeConvIdRef.current) {
+      // Same conversation we're already tracking — nothing to reset.
+      return
+    }
     autoTitledRef.current = false
     setCustomTitle(null)
     setMessages(sanitiseLoadedMessages(conversation?.messages ?? []))
     setIsStreaming(false)
     setIsCompressing(false)
     streamingIdRef.current = null
+    // Keep activeConvId in sync when the user switches to a different conversation.
+    // For new chats (conversation?.id is undefined) we keep the pre-generated UUID.
+    if (conversation?.id) setActiveConvId(conversation.id)
   }, [conversation?.id])
 
   // ── Per-conversation model lock ───────────────────────────────────────────
@@ -128,65 +145,73 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
     return settings
   }, [settings, conversation?.model, conversation?.provider, conversation?.messages?.length])
 
-  // ── Stream + tool listeners ───────────────────────────────────────────────
+  // ── Refs for values the listeners need — always current, no stale closures ──
+  // Listeners are registered ONCE on mount (empty deps). All dynamic values are
+  // read through refs so no teardown/re-register cycle can drop mid-flight events.
+  const activeConvIdRef     = useRef(activeConvId)
+  const effectiveSettingsRef = useRef(effectiveSettings)
+  activeConvIdRef.current      = activeConvId        // updated every render, sync
+  effectiveSettingsRef.current = effectiveSettings
+
+  // ── Stream + tool listeners — registered ONCE, torn down on unmount only ──
   useEffect(() => {
+    const ok = (id: string) => id === activeConvIdRef.current
+
     // Text chunk
     window.api.onStreamChunk((payload: StreamChunkPayload) => {
-      if (payload.conversationId !== activeConvId) return
-      setIsCompressing(false)   // first token arrived — compression done
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? { ...m, content: m.content + payload.chunk }
-            : m
-        )
-      )
+      if (!ok(payload.conversationId)) return
+      setIsCompressing(false)
+      setMessages(prev => prev.map(m =>
+        m.id === streamingIdRef.current ? { ...m, content: m.content + payload.chunk } : m
+      ))
     })
 
     // Stream done
     window.api.onStreamDone((payload: StreamDonePayload) => {
-      if (payload.conversationId !== activeConvId) return
+      if (!ok(payload.conversationId)) return
+      if (streamSafetyTimerRef.current) { clearTimeout(streamSafetyTimerRef.current); streamSafetyTimerRef.current = null }
       setIsCompressing(false)
       setMessages(prev => {
-        const updated = prev.map(m =>
-          m.id === streamingIdRef.current ? { ...m, isStreaming: false } : m
-        )
-
-        // Fire auto-title after the first completed AI response (once per mount)
+        const updated = prev.map(m => {
+          if (m.id === streamingIdRef.current) return { ...m, isStreaming: false }
+          if (m.isStreaming) return { ...m, isStreaming: false }
+          return m
+        })
         if (!autoTitledRef.current) {
           const aiCount   = updated.filter(m => m.role === 'assistant').length
           const firstUser = updated.find(m => m.role === 'user')
           if (aiCount === 1 && firstUser?.content) {
             autoTitledRef.current = true
             setTimeout(() => {
-              window.api.autoTitleConversation(
-                firstUser.content.slice(0, 400),
-                effectiveSettings
-              ).then(result => {
-                if (result.ok && result.title) setCustomTitle(result.title)
-              }).catch(() => { /* silently ignore title failures */ })
+              window.api.autoTitleConversation(firstUser.content.slice(0, 400), effectiveSettingsRef.current)
+                .then(r => { if (r.ok && r.title) setCustomTitle(r.title) })
+                .catch(() => {})
             }, 0)
           }
         }
-
         return updated
       })
-      // ── Agent auto-continue ────────────────────────────────────────────
+
+      // Agent auto-continue
       if (modeRef.current === 'agent') {
         setMessages(latest => {
           const lastAI = [...latest].reverse().find(m => m.role === 'assistant')
           if (lastAI && !lastAI.error && !lastAI.stopped) {
+            const hasContent   = lastAI.content.trim().length > 0
+            const hasToolCalls = (lastAI.toolCalls?.length ?? 0) > 0
+            if (!hasContent && !hasToolCalls) {
+              return latest.map(m => m.id === lastAI.id
+                ? { ...m, error: 'Agent returned an empty response. Click Retry to try again.' }
+                : m)
+            }
             const shouldContinue = detectAgentShouldContinue(lastAI.content)
-            const turnCount      = autoContinueCountRef.current
-            if (shouldContinue && turnCount < MAX_AUTO_CONTINUES && !agentPausedRef.current) {
+            if (shouldContinue && autoContinueCountRef.current < MAX_AUTO_CONTINUES && !agentPausedRef.current) {
               autoContinueTimerRef.current = setTimeout(() => {
                 autoContinueCountRef.current++
                 setAutoContinueCount(autoContinueCountRef.current)
-                // Use a custom event to trigger the next send without a circular dep
                 window.dispatchEvent(new CustomEvent('agent-continue', { detail: { convId: payload.conversationId } }))
               }, 600)
             } else if (!shouldContinue) {
-              // Agent finished — reset counter
               autoContinueCountRef.current = 0
               setAutoContinueCount(0)
             }
@@ -199,151 +224,122 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       setIsStreaming(false)
     })
 
-    // Stream error — keep whatever the AI already produced (text + tool calls),
-    // just mark it done and attach the error so it renders below the partial response.
+    // Stream error
     window.api.onStreamError((payload: StreamErrorPayload) => {
-      if (payload.conversationId !== activeConvId) return
+      if (!ok(payload.conversationId)) return
+      if (streamSafetyTimerRef.current) { clearTimeout(streamSafetyTimerRef.current); streamSafetyTimerRef.current = null }
       setIsCompressing(false)
-      setMessages(prev =>
-        prev.map(m => {
-          if (m.id !== streamingIdRef.current) return m
-          // If there's already content or tool calls, preserve them and append the error.
-          // If nothing arrived yet (empty message), replace with error only.
-          const hasWork = m.content.trim().length > 0 || (m.toolCalls && m.toolCalls.length > 0)
-          return {
-            ...m,
-            isStreaming: false,
-            error: payload.error,
-            // Keep existing content; clear it only if nothing was produced at all
-            content: hasWork ? m.content : ''
+      setMessages(prev => {
+        let matched = false
+        const mapped = prev.map(m => {
+          if (m.id === streamingIdRef.current) {
+            matched = true
+            const hasWork = m.content.trim().length > 0 || (m.toolCalls && m.toolCalls.length > 0)
+            return { ...m, isStreaming: false, error: payload.error, content: hasWork ? m.content : '' }
           }
+          if (m.isStreaming) { matched = true; return { ...m, isStreaming: false, error: payload.error } }
+          return m
         })
-      )
+        if (!matched && streamingIdRef.current) {
+          return [...mapped, { id: streamingIdRef.current, role: 'assistant' as const, content: '', timestamp: Date.now(), isStreaming: false, error: payload.error }]
+        }
+        return mapped
+      })
       streamingIdRef.current = null
       setIsStreaming(false)
     })
 
-    // Tool call starting — add to the current AI message's toolCalls array
+    // Tool call start
     window.api.onToolCallStart((payload: ToolCallStartPayload) => {
-      if (payload.conversationId !== activeConvId) return
-      const newCall: ToolCallDisplay = {
-        id:      payload.callId,
-        name:    payload.name,
-        input:   payload.input,
-        isError: false,
-        status:  'running'
-      }
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? { ...m, toolCalls: [...(m.toolCalls ?? []), newCall] }
-            : m
-        )
-      )
+      if (!ok(payload.conversationId)) return
+      const newCall: ToolCallDisplay = { id: payload.callId, name: payload.name, input: payload.input, isError: false, status: 'running' }
+      setMessages(prev => prev.map(m =>
+        m.id === streamingIdRef.current ? { ...m, toolCalls: [...(m.toolCalls ?? []), newCall] } : m
+      ))
     })
 
-    // Command approval pending — flip the tool card to awaiting-approval state.
-    // App.tsx holds the single IPC listener and re-dispatches as a DOM event,
-    // so we listen here without competing with the modal listener.
+    // Tool call result
+    window.api.onToolCallResult((payload: ToolCallResultPayload) => {
+      if (!ok(payload.conversationId)) return
+      setMessages(prev => prev.map(m =>
+        m.id === streamingIdRef.current
+          ? { ...m, toolCalls: (m.toolCalls ?? []).map(tc =>
+              tc.id === payload.callId
+                ? { ...tc, output: payload.output, liveOutput: undefined, isError: payload.isError, status: payload.isError ? 'error' : 'done' }
+                : tc) }
+          : m
+      ))
+    })
+
+    // Tool output chunk (live terminal)
+    window.api.onToolOutputChunk((payload: ToolOutputChunkPayload) => {
+      if (!ok(payload.conversationId)) return
+      setMessages(prev => prev.map(m =>
+        m.id === streamingIdRef.current
+          ? { ...m, toolCalls: (m.toolCalls ?? []).map(tc =>
+              tc.id === payload.callId ? { ...tc, liveOutput: (tc.liveOutput ?? '') + payload.chunk } : tc) }
+          : m
+      ))
+    })
+
+    // Context compressing
+    window.api.onContextCompressing((payload: ContextCompressingPayload) => {
+      if (!ok(payload.conversationId)) return
+      setIsCompressing(true)
+    })
+
+    // Session changes (changed files / snapshot)
+    window.api.onSessionChanges((payload: SessionChangesPayload) => {
+      if (!ok(payload.conversationId)) return
+      setMessages(prev => prev.map(m =>
+        m.id === streamingIdRef.current ? { ...m, changedFiles: payload.files, snapshotId: payload.snapshotId } : m
+      ))
+    })
+
+    // DOM events (cmd approval, diff attach, agent continue) — no conv-id filter needed
     const cmdApprovalHandler = (e: Event) => {
       const payload = (e as CustomEvent<CmdApprovalPayload>).detail
       if (!payload.callId) return
-      setMessages(prev =>
-        prev.map(m => ({
-          ...m,
-          toolCalls: m.toolCalls?.map(tc =>
-            tc.id === payload.callId
-              ? { ...tc, status: 'awaiting-approval' as const, approvalId: payload.id }
-              : tc
-          )
-        }))
-      )
+      setMessages(prev => prev.map(m => ({
+        ...m,
+        toolCalls: m.toolCalls?.map(tc =>
+          tc.id === payload.callId ? { ...tc, status: 'awaiting-approval' as const, approvalId: payload.id } : tc
+        )
+      })))
     }
-    window.addEventListener('cmd-approval-pending', cmdApprovalHandler)
-
-    // Tool call result — update the matching call in the current AI message
-    window.api.onToolCallResult((payload: ToolCallResultPayload) => {
-      if (payload.conversationId !== activeConvId) return
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? {
-                ...m,
-                toolCalls: (m.toolCalls ?? []).map(tc =>
-                  tc.id === payload.callId
-                    ? { ...tc, output: payload.output, liveOutput: undefined, isError: payload.isError, status: payload.isError ? 'error' : 'done' }
-                    : tc
-                )
-              }
-            : m
+    const diffAttachHandler = (e: Event) => {
+      const { diffId, callId, payload } = (e as CustomEvent<DiffAttachPayload>).detail
+      setMessages(prev => prev.map(m => ({
+        ...m,
+        toolCalls: m.toolCalls?.map(tc =>
+          tc.id === callId ? { ...tc, status: 'awaiting-approval' as const, diffPayload: payload, diffId } : tc
         )
-      )
-    })
-
-    // Context compression starting — show a status indicator
-    window.api.onContextCompressing((payload: ContextCompressingPayload) => {
-      if (payload.conversationId !== activeConvId) return
-      setIsCompressing(true)
-      // Will be cleared by onStreamChunk (first token arrives) or onStreamError/Done
-    })
-
-    // Session change summary — attach changed files + snapshot ID to the current AI message
-    window.api.onSessionChanges((payload: SessionChangesPayload) => {
-      if (payload.conversationId !== activeConvId) return
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? { ...m, changedFiles: payload.files, snapshotId: payload.snapshotId }
-            : m
-        )
-      )
-    })
-
-    // Streaming output chunk from run_command — append to liveOutput buffer
-    window.api.onToolOutputChunk((payload: ToolOutputChunkPayload) => {
-      if (payload.conversationId !== activeConvId) return
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? {
-                ...m,
-                toolCalls: (m.toolCalls ?? []).map(tc =>
-                  tc.id === payload.callId
-                    ? { ...tc, liveOutput: (tc.liveOutput ?? '') + payload.chunk }
-                    : tc
-                )
-              }
-            : m
-        )
-      )
-    })
-
-    // ── Agent auto-continue event listener ─────────────────────────────
+      })))
+    }
     const handleAgentContinue = (e: Event) => {
       const detail = (e as CustomEvent).detail
-      if (detail?.convId === activeConvId) {
-        // Dispatch a sendMessage for "Continue with the next step."
-        // We trigger this asynchronously after the streaming state has cleared
-        setTimeout(() => {
-          window.dispatchEvent(new CustomEvent('agent-send-continue'))
-        }, 50)
+      if (detail?.convId === activeConvIdRef.current) {
+        setTimeout(() => window.dispatchEvent(new CustomEvent('agent-send-continue')), 50)
       }
     }
+    window.addEventListener('cmd-approval-pending', cmdApprovalHandler)
+    window.addEventListener('diff-attach', diffAttachHandler)
     window.addEventListener('agent-continue', handleAgentContinue)
 
     return () => {
-      window.removeEventListener('agent-continue', handleAgentContinue)
       window.removeEventListener('cmd-approval-pending', cmdApprovalHandler)
+      window.removeEventListener('diff-attach', diffAttachHandler)
+      window.removeEventListener('agent-continue', handleAgentContinue)
       window.api.removeStreamListeners()
-      // Clear any message that got stuck with isStreaming:true when listeners are torn down
       setMessages(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
       setIsStreaming(false)
       setIsCompressing(false)
       streamingIdRef.current = null
-      // Clear auto-continue timer
       if (autoContinueTimerRef.current) { clearTimeout(autoContinueTimerRef.current); autoContinueTimerRef.current = null }
+      if (streamSafetyTimerRef.current) { clearTimeout(streamSafetyTimerRef.current); streamSafetyTimerRef.current = null }
     }
-  }, [activeConvId])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])  // ← empty: register once on mount, never re-run
 
   // ── Persist conversation on every message change ──────────────────────────
   useEffect(() => {
@@ -367,19 +363,19 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
 
   // ── Send ──────────────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (text: string, images?: ImageAttachment[]) => {
+    async (text: string, images?: ImageAttachment[], urlFetches?: import('../../../shared/types').UrlFetch[]) => {
       const hasContent = text.trim().length > 0 || (images && images.length > 0)
       if (!hasContent || isStreaming) return
 
-      const convId = activeConvId ?? genId()
-      if (!activeConvId) setActiveConvId(convId)
+      const convId = activeConvId
 
       const userMsg: ChatMessage = {
         id:        genId(),
         role:      'user',
         content:   text.trim(),
         timestamp: Date.now(),
-        ...(images && images.length > 0 ? { images } : {})
+        ...(images     && images.length > 0     ? { images }     : {}),
+        ...(urlFetches && urlFetches.length > 0 ? { urlFetches } : {}),
       }
 
       const aiMsgId = genId()
@@ -389,7 +385,8 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
         content:     '',
         timestamp:   Date.now(),
         isStreaming: true,
-        toolCalls:   []
+        toolCalls:   [],
+        agentMode:   modeRef.current === 'agent' || undefined
       }
 
       streamingIdRef.current = aiMsgId
@@ -401,17 +398,41 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
         aiMsg
       ])
 
-      const history = [...messages, userMsg].map(m => ({
-        role:    m.role,
-        content: m.content,
-        ...(m.images && m.images.length > 0 ? { images: m.images } : {})
-      }))
+      // Safety valve: if STREAM_DONE/ERROR never arrives (e.g. IPC event lost),
+      // auto-reset streaming state after 5 minutes so the UI doesn't stay frozen.
+      if (streamSafetyTimerRef.current) clearTimeout(streamSafetyTimerRef.current)
+      streamSafetyTimerRef.current = setTimeout(() => {
+        if (streamingIdRef.current === aiMsgId) {
+          setMessages(prev => prev.map(m =>
+            m.isStreaming ? { ...m, isStreaming: false, error: m.error ?? 'Stream timed out — no response received.' } : m
+          ))
+          streamingIdRef.current = null
+          setIsStreaming(false)
+        }
+      }, 5 * 60 * 1000)
+
+      const history = [...messages, userMsg].map(m => {
+        // For user messages that have pre-fetched URL content, append it to the
+        // AI's copy of the message so the model sees the full page text.
+        // The displayed message (m.content) stays clean — only urlFetches holds the raw text.
+        const urlContext = m.urlFetches?.length
+          ? '\n\n' + m.urlFetches.map(f =>
+              `---\nFetched content from ${f.url}:\n\n${f.content}\n---`
+            ).join('\n\n')
+          : ''
+        return {
+          role:    m.role,
+          content: m.content + urlContext,
+          ...(m.images && m.images.length > 0 ? { images: m.images } : {})
+        }
+      })
 
       try {
         await window.api.sendMessage({ conversationId: convId, messages: history, settings: effectiveSettings, mode: modeRef.current, workspacePath: workspacePath ?? conversation?.workspacePath })
       } catch (err) {
         // IPC invoke itself threw (e.g. main process error before stream started)
         const errorMsg = err instanceof Error ? err.message : 'Failed to send message'
+        if (streamSafetyTimerRef.current) { clearTimeout(streamSafetyTimerRef.current); streamSafetyTimerRef.current = null }
         setMessages(prev => prev.map(m =>
           m.id === aiMsgId
             ? { ...m, isStreaming: false, error: errorMsg }
@@ -431,8 +452,7 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       const idx = messages.findIndex(m => m.id === messageId)
       if (idx < 0) return
 
-      const convId = activeConvId ?? genId()
-      if (!activeConvId) setActiveConvId(convId)
+      const convId = activeConvId
 
       // Preserve any images attached to the original message
       const original      = messages[idx]
@@ -453,7 +473,8 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
         content:     '',
         timestamp:   Date.now(),
         isStreaming: true,
-        toolCalls:   []
+        toolCalls:   [],
+        agentMode:   modeRef.current === 'agent' || undefined
       }
 
       streamingIdRef.current = aiMsgId
@@ -500,16 +521,29 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       window.api.abortMessage(activeConvId)
       setIsStreaming(false)
       setMessages(prev =>
-        prev.map(m =>
-          m.id === streamingIdRef.current
-            ? { ...m, isStreaming: false, stopped: true }
-            : m
-        )
+        prev.map(m => {
+          // Clear the streaming message (exact match or any stuck streaming message)
+          if (m.id === streamingIdRef.current || m.isStreaming) {
+            return {
+              ...m,
+              isStreaming: false,
+              stopped: true,
+              // Terminate any tool calls that were still running when stopped
+              toolCalls: m.toolCalls?.map(tc =>
+                tc.status === 'running' || tc.status === 'awaiting-approval'
+                  ? { ...tc, status: 'stopped' as const }
+                  : tc
+              ),
+            }
+          }
+          return m
+        })
       )
       streamingIdRef.current = null
     }
-    // Clear agent auto-continue
+    // Clear timers
     if (autoContinueTimerRef.current) { clearTimeout(autoContinueTimerRef.current); autoContinueTimerRef.current = null }
+    if (streamSafetyTimerRef.current) { clearTimeout(streamSafetyTimerRef.current); streamSafetyTimerRef.current = null }
     autoContinueCountRef.current = 0
     setAutoContinueCount(0)
     agentPausedRef.current = false
@@ -548,7 +582,6 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
 
   const clearMessages = useCallback(() => {
     setMessages([])
-    setActiveConvId(null)
     streamingIdRef.current = null
     setIsStreaming(false)
     // Reset agent state

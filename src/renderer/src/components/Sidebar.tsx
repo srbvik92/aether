@@ -41,14 +41,17 @@ interface Props {
   onOpenGitHub?:       () => void
   onOpenScheduler?:    () => void
   onOpenPresets?:      () => void
-  onOpenMcp?:          () => void
   onOpenJiraLinear?:   () => void
   onImport?:           () => void
   onExportAll?:        () => void
   onImportAll?:        () => void
   onOpenFeatureTour?:  () => void
   onOpenLogs?:         () => void
-  onTagChange?:        (convId: string, tags: string[]) => void
+  onOpenDocker?:          () => void
+  onOpenHttpBuilder?:     () => void
+  onOpenDepAudit?:        () => void
+  onOpenEmbeddedBrowser?: () => void
+  onTagChange?:           (convId: string, tags: string[]) => void
 }
 
 interface TagPickerProps {
@@ -135,16 +138,42 @@ export default function Sidebar({
   conversations, activeConvId, settings,
   onNew, onSelect, onDelete, onRename, onOpenSettings, onOpenCosts, onOpenGlobalMemory,
   onSwitchWorkspace, onToggleTheme, onToggleTerminal, terminalOpen, onOpenSearch,
-  onOpenCompare, onOpenGitHub, onOpenScheduler, onOpenPresets, onOpenMcp,
-  onOpenJiraLinear, onImport, onExportAll, onImportAll, onOpenFeatureTour, onOpenLogs, onTagChange,
+  onOpenCompare, onOpenGitHub, onOpenScheduler, onOpenPresets,
+  onOpenJiraLinear, onImport, onExportAll, onImportAll, onOpenFeatureTour, onOpenLogs, onOpenDocker,
+  onOpenHttpBuilder, onOpenDepAudit, onOpenEmbeddedBrowser, onTagChange,
   onSetTheme
 }: Props) {
-  const [search,          setSearch]          = useState('')
-  const [renamingId,      setRenamingId]      = useState<string | null>(null)
-  const [renameValue,     setRenameValue]     = useState('')
-  const [recentsOpen,     setRecentsOpen]     = useState(false)
-  const [activeTag,       setActiveTag]       = useState<string | null>(null)
-  const [tagPickerConvId, setTagPickerConvId] = useState<string | null>(null)
+  const [search,            setSearch]            = useState('')
+  const [renamingId,        setRenamingId]        = useState<string | null>(null)
+  const [renameValue,       setRenameValue]       = useState('')
+  const [recentsOpen,       setRecentsOpen]       = useState(false)
+  const [activeTag,         setActiveTag]         = useState<string | null>(null)
+  const [tagPickerConvId,   setTagPickerConvId]   = useState<string | null>(null)
+  // Delete confirmation — stores the id of the conversation pending delete
+  const [confirmDeleteId,   setConfirmDeleteId]   = useState<string | null>(null)
+  // Tracks which project groups are collapsed (by workspacePath).
+  // Groups start expanded. When a group containing the active conversation is
+  // collapsed we auto-expand it so the active item stays visible.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+
+  const toggleGroup = (workspace: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(workspace)) { next.delete(workspace) } else { next.add(workspace) }
+      return next
+    })
+  }
+
+  // Auto-expand a group when the active conversation is inside it
+  useEffect(() => {
+    if (!activeConvId) return
+    const conv = conversations.find(c => c.id === activeConvId)
+    if (!conv) return
+    const key = conv.workspacePath ?? ''
+    if (key && collapsedGroups.has(key)) {
+      setCollapsedGroups(prev => { const next = new Set(prev); next.delete(key); return next })
+    }
+  }, [activeConvId]) // eslint-disable-line react-hooks/exhaustive-deps
   const renameInputRef = useRef<HTMLInputElement>(null)
   const recentsRef     = useRef<HTMLDivElement>(null)
 
@@ -295,39 +324,78 @@ export default function Sidebar({
           <React.Fragment key={workspace || '__general__'}>
 
             {/* Folder header — shown when there are multiple groups */}
-            {showGroups && (
-              <div className="flex items-center gap-1.5 px-1 pt-3 pb-1 first:pt-1">
-                <svg className="w-3 h-3 text-gray-400 dark:text-gray-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
-                </svg>
-                <span
-                  className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-600 truncate flex-1"
-                  title={workspace || 'General'}
+            {showGroups && (() => {
+              const isCollapsed = !!workspace && collapsedGroups.has(workspace)
+              return (
+                <div
+                  className={`group/header flex items-center gap-1.5 px-1 pb-1 ${workspace ? 'pt-3' : 'pt-1'} cursor-pointer select-none`}
+                  onClick={() => workspace && toggleGroup(workspace)}
+                  title={workspace ? (isCollapsed ? `Expand ${folderLabel(workspace)}` : `Collapse ${folderLabel(workspace)}`) : undefined}
                 >
-                  {workspace ? folderLabel(workspace) : 'General'}
-                </span>
-                {/* New chat in this folder */}
-                {workspace && (
-                  <button
-                    onClick={() => onNew(workspace)}
-                    title={`New chat in ${folderLabel(workspace)}`}
-                    className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:text-blue-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-                  >
-                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                  {/* Chevron — only for workspace groups (General can't be collapsed) */}
+                  {workspace ? (
+                    <svg
+                      className={`w-3 h-3 text-gray-400 dark:text-gray-500 flex-shrink-0 transition-transform duration-150 ${isCollapsed ? '-rotate-90' : ''}`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
                     </svg>
-                  </button>
-                )}
-              </div>
-            )}
+                  ) : (
+                    <svg className="w-3 h-3 text-gray-400 dark:text-gray-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+                    </svg>
+                  )}
+                  <span
+                    className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 truncate flex-1"
+                    title={workspace || 'General'}
+                  >
+                    {workspace ? folderLabel(workspace) : 'General'}
+                  </span>
+                  {/* New chat in this folder */}
+                  {workspace && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onNew(workspace) }}
+                      title={`New chat in ${folderLabel(workspace)}`}
+                      className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-gray-400 hover:text-blue-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors opacity-0 group-hover/header:opacity-100"
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              )
+            })()}
 
-        {convs.map((conv) => (
+        {/* ── Build branch tree within this workspace group ── */}
+        {!collapsedGroups.has(workspace) && (() => {
+          const convIdSet = new Set(convs.map(c => c.id))
+          const branchOf: Record<string, Conversation[]> = {}
+          const rootConvs: Conversation[] = []
+          for (const c of convs) {
+            if (c.parentConversationId && convIdSet.has(c.parentConversationId)) {
+              ;(branchOf[c.parentConversationId] ??= []).push(c)
+            } else {
+              rootConvs.push(c)
+            }
+          }
+          const treeItems: { conv: Conversation; depth: number }[] = []
+          const flattenTree = (c: Conversation, d: number) => {
+            treeItems.push({ conv: c, depth: d })
+            for (const child of (branchOf[c.id] ?? [])) flattenTree(child, d + 1)
+          }
+          for (const r of rootConvs) flattenTree(r, 0)
+          return treeItems
+        })()?.map(({ conv, depth }) => (
           <React.Fragment key={conv.id}>
           <div
             role="listitem"
             aria-current={activeConvId === conv.id ? 'true' : undefined}
-            onClick={() => { if (renamingId !== conv.id) onSelect(conv.id) }}
+            onClick={() => { if (renamingId !== conv.id) { setConfirmDeleteId(null); onSelect(conv.id) } }}
+            style={depth > 0 ? { marginLeft: `${depth * 12}px` } : undefined}
             className={`group flex items-start gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors ${
+              depth > 0 ? 'border-l-2 border-purple-200 dark:border-purple-800/60 pl-2 rounded-l-none' : ''
+            } ${
               conv.id === activeConvId
                 ? 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
                 : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400'
@@ -348,10 +416,16 @@ export default function Sidebar({
               ) : (
                 // ── Title (double-click to rename) ───────────────────────────
                 <p
-                  className="text-sm truncate"
+                  className="text-sm truncate flex items-center gap-1"
                   onDoubleClick={(e) => { e.stopPropagation(); startRename(conv) }}
                   title="Double-click to rename"
                 >
+                  {depth > 0 && (
+                    <span className="text-purple-400 dark:text-purple-500 flex-shrink-0 text-[10px]" title="Branch conversation">⎇</span>
+                  )}
+                  {conv.mode === 'agent' && (
+                    <span className="text-amber-500 flex-shrink-0 text-xs" title="Agent conversation">⚡</span>
+                  )}
                   {conv.title}
                 </p>
               )}
@@ -403,17 +477,41 @@ export default function Sidebar({
                     </svg>
                   </button>
                 )}
-                {/* Delete */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); onDelete(conv.id) }}
-                  className="text-gray-400 hover:text-red-500 transition-colors p-0.5"
-                  title="Delete"
-                  aria-label="Delete"
-                >
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
+                {/* Delete — with inline confirmation */}
+                {confirmDeleteId === conv.id ? (
+                  <span className="flex items-center gap-0.5 ml-0.5">
+                    <span className="text-[10px] text-red-400 font-medium leading-none mr-0.5">Sure?</span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onDelete(conv.id); setConfirmDeleteId(null) }}
+                      className="text-red-500 hover:text-red-600 transition-colors p-0.5"
+                      title="Confirm delete"
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null) }}
+                      className="text-gray-400 hover:text-gray-600 transition-colors p-0.5"
+                      title="Cancel"
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(conv.id) }}
+                    className="text-gray-400 hover:text-red-500 transition-colors p-0.5"
+                    title="Delete"
+                    aria-label="Delete"
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -436,7 +534,7 @@ export default function Sidebar({
       </div>
 
       {/* Git status bar */}
-      <GitStatusBar workspacePath={settings.workspacePath ?? ''} />
+      <GitStatusBar workspacePath={settings.workspacePath ?? ''} settings={settings} />
 
       {/* Footer */}
       <div className="border-t border-gray-200 dark:border-gray-800 px-3 pt-2 pb-3 space-y-2">
@@ -529,13 +627,6 @@ export default function Sidebar({
             </button>
           )}
 
-          {/* MCP Servers */}
-          {onOpenMcp && (
-            <button onClick={onOpenMcp} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-purple-500 dark:hover:text-purple-400" title="MCP Servers" aria-label="MCP Servers">
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-            </button>
-          )}
-
           {/* Jira / Linear */}
           {onOpenJiraLinear && (
             <button onClick={onOpenJiraLinear} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-blue-500 dark:hover:text-blue-400" title="Jira / Linear issues" aria-label="Jira / Linear issues">
@@ -575,6 +666,42 @@ export default function Sidebar({
           {onOpenLogs && (
             <button onClick={onOpenLogs} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-gray-700 dark:hover:text-gray-200" title="View application logs" aria-label="View logs">
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+            </button>
+          )}
+
+          {/* Docker */}
+          {onOpenDocker && (
+            <button onClick={onOpenDocker} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-blue-500 dark:hover:text-blue-400" title="Docker Manager" aria-label="Docker Manager">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.186.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.186.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.186.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.184-.186h-2.12a.186.186 0 00-.186.185v1.888c0 .102.084.185.186.185m-2.92 0h2.12a.186.186 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.186v1.887c0 .102.083.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288Z"/>
+              </svg>
+            </button>
+          )}
+
+          {/* HTTP Builder */}
+          {onOpenHttpBuilder && (
+            <button onClick={onOpenHttpBuilder} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-blue-500 dark:hover:text-blue-400" title="HTTP Builder" aria-label="HTTP Builder">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+              </svg>
+            </button>
+          )}
+
+          {/* Dependency Audit */}
+          {onOpenDepAudit && (
+            <button onClick={onOpenDepAudit} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-orange-500 dark:hover:text-orange-400" title="Dependency Audit" aria-label="Dependency Audit">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+              </svg>
+            </button>
+          )}
+
+          {/* Embedded Browser */}
+          {onOpenEmbeddedBrowser && (
+            <button onClick={onOpenEmbeddedBrowser} className="w-7 h-7 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center justify-center text-gray-400 hover:text-emerald-500 dark:hover:text-emerald-400" title="Embedded Browser" aria-label="Embedded Browser">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+              </svg>
             </button>
           )}
 
@@ -622,7 +749,7 @@ export default function Sidebar({
 
         {/* Keyboard shortcut hints */}
         <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-          {[['Ctrl+N','New'], ['Ctrl+,','Settings'], ['Ctrl+/','Focus'], ['Ctrl+`','Terminal'], ['Ctrl+⇧F','Search']].map(([k, label]) => (
+          {[['Ctrl+K','Commands'], ['Ctrl+N','New'], ['Ctrl+,','Settings'], ['Ctrl+`','Terminal'], ['Ctrl+⇧F','Search']].map(([k, label]) => (
             <span key={k} className="text-[10px] text-gray-300 dark:text-gray-700">
               <kbd className="font-mono">{k}</kbd> {label}
             </span>

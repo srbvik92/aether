@@ -5,6 +5,10 @@ interface Props {
   mode: ConversationMode
   onChange: (mode: ConversationMode) => void
   disabled?: boolean
+  /** When true, renders as an inline group (no outer border/background/padding — for use inside a header row) */
+  inline?: boolean
+  /** When true, hides tab text labels — shows icons only */
+  compact?: boolean
 }
 
 const TABS: { id: ConversationMode; label: string; icon: React.ReactNode; description: string }[] = [
@@ -65,9 +69,12 @@ const TABS: { id: ConversationMode; label: string; icon: React.ReactNode; descri
   }
 ]
 
-export default function ModeTabBar({ mode, onChange, disabled }: Props) {
+export default function ModeTabBar({ mode, onChange, disabled, inline, compact }: Props) {
   return (
-    <div className="flex items-center gap-0.5 px-3 py-1.5 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 overflow-x-auto">
+    <div className={inline
+      ? 'flex items-center gap-0.5'
+      : 'flex items-center gap-0.5 px-3 py-1.5 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 overflow-x-auto'
+    }>
       {TABS.map(tab => {
         const active = mode === tab.id
         return (
@@ -75,11 +82,12 @@ export default function ModeTabBar({ mode, onChange, disabled }: Props) {
             key={tab.id}
             onClick={() => !disabled && onChange(tab.id)}
             disabled={disabled}
-            title={tab.description}
+            title={`${tab.label} — ${tab.description}`}
             aria-label={tab.label}
             aria-pressed={active}
             className={`
-              flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap flex-shrink-0
+              flex items-center gap-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap flex-shrink-0
+              ${compact ? 'px-1.5 py-1' : 'px-2.5 py-1'}
               ${active
                 ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 shadow-sm border border-gray-200 dark:border-gray-700'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white/60 dark:hover:bg-gray-800/60'
@@ -88,7 +96,7 @@ export default function ModeTabBar({ mode, onChange, disabled }: Props) {
             `}
           >
             {tab.icon}
-            <span>{tab.label}</span>
+            {!compact && <span>{tab.label}</span>}
             {tab.id === 'agent' && active && (
               <span className="flex h-1.5 w-1.5 relative ml-0.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />

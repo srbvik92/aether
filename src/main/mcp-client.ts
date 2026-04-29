@@ -36,6 +36,9 @@ class McpClient {
 
   async start(): Promise<{ ok: boolean; tools?: McpTool[]; error?: string }> {
     try {
+      if (!this.config.command) {
+        return { ok: false, error: 'No command configured for this MCP server (remote servers do not use stdio).' }
+      }
       const env = { ...process.env, ...(this.config.env ?? {}) }
       this.process = spawn(this.config.command, this.config.args ?? [], {
         env,

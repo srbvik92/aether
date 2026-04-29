@@ -20,8 +20,9 @@ function rowsToMarkdownTable(columns: string[], rows: unknown[][]): string {
   return [header, divider, ...body].join('\n') + truncNote
 }
 
-function inferDbType(connStr: string): 'sqlite' | 'postgres' | 'unknown' {
+function inferDbType(connStr: string): 'sqlite' | 'postgres' | 'mysql' | 'unknown' {
   if (connStr.startsWith('postgres://') || connStr.startsWith('postgresql://')) return 'postgres'
+  if (connStr.startsWith('mysql://') || connStr.startsWith('mysql2://')) return 'mysql'
   if (connStr.endsWith('.db') || connStr.endsWith('.sqlite') || connStr.endsWith('.sqlite3') ||
       connStr.startsWith('sqlite:')) return 'sqlite'
   if (existsSync(connStr)) return 'sqlite'
@@ -36,7 +37,7 @@ async function querySQLite(dbPath: string, sql: string): Promise<ToolResult> {
       return { output: 'better-sqlite3 is not installed. Run: npm install better-sqlite3', isError: true }
     }
     const Database = mod.default ?? mod
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const db = new Database(dbPath, { readonly: false, fileMustExist: true })
     const stmt = db.prepare(sql)
     const isSelect = /^\s*(select|pragma|explain|with)\b/i.test(sql)
     if (isSelect) {
@@ -87,6 +88,41 @@ async function queryPostgres(connStr: string, sql: string): Promise<ToolResult> 
   }
 }
 
+async function queryMySQL(connStr: string, sql: string): Promise<ToolResult> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mod: any = await import('mysql2/promise').catch(() => null)
+    if (!mod) {
+      return { output: 'mysql2 is not installed. Run: npm install mysql2', isError: true }
+    }
+    // mysql2 connection string: mysql://user:pass@host:3306/dbname
+    const url = connStr.replace(/^mysql2:\/\//, 'mysql://')
+    const conn = await mod.createConnection(url)
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const [rows, fields]: [any[], any[]] = await conn.execute(sql)
+      await conn.end()
+      // Non-SELECT (INSERT/UPDATE/DELETE) returns OkPacket, not an array of rows
+      if (!Array.isArray(rows) || !fields) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const info = rows as any
+        return { output: `OK — ${info.affectedRows ?? 0} rows affected`, isError: false }
+      }
+      if (rows.length === 0) return { output: '*(query returned 0 rows)*', isError: false }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const columns: string[] = fields.map((f: any) => f.name)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rowArrays = (rows as any[]).map((r: any) => columns.map(c => r[c]))
+      return { output: rowsToMarkdownTable(columns, rowArrays), isError: false }
+    } catch (e) {
+      await conn.end().catch(() => {})
+      throw e
+    }
+  } catch (e) {
+    return { output: `MySQL error: ${String(e)}`, isError: true }
+  }
+}
+
 export async function queryDatabase(
   connStr: string,
   sql: string,
@@ -101,11 +137,15 @@ export async function queryDatabase(
   if (type === 'postgres') {
     return queryPostgres(connStr, sql)
   }
+  if (type === 'mysql') {
+    return queryMySQL(connStr, sql)
+  }
   return {
     output:
       'Cannot infer database type from connection string.\n' +
-      '- SQLite: provide a .db / .sqlite file path, e.g. "db/app.sqlite"\n' +
-      '- PostgreSQL: "postgres://user:password@host:5432/dbname"',
+      '- SQLite:     provide a .db / .sqlite file path, e.g. "db/app.sqlite"\n' +
+      '- PostgreSQL: "postgres://user:password@host:5432/dbname"\n' +
+      '- MySQL:      "mysql://user:password@host:3306/dbname"',
     isError: true
   }
 }

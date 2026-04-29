@@ -23,11 +23,30 @@ const CONTEXT_WINDOWS: Record<string, number> = {
   'claude-opus-4-6':    200_000,
   'claude-sonnet-4-6':  200_000,
   'claude-haiku-4-5':   200_000,
-  // OpenAI
-  'gpt-4o':             128_000,
-  'gpt-4o-mini':        128_000,
-  'gpt-4-turbo':        128_000,
-  'gpt-3.5-turbo':       16_385,
+  // OpenAI — GPT-5 family (assumed 200K until official specs published)
+  'gpt-5':              200_000,
+  'gpt-5.1':            200_000,
+  'gpt-5.2':            200_000,
+  'gpt-5.3':            200_000,
+  'gpt-5.4':            200_000,
+  'gpt-5.5':            200_000,
+  // OpenAI — GPT-4.1 family (1M context)
+  'gpt-4.1':            1_047_576,
+  'gpt-4.1-mini':       1_047_576,
+  'gpt-4.1-nano':       1_047_576,
+  // OpenAI — O-series reasoning
+  'o4-mini':              200_000,
+  'o3':                   200_000,
+  'o3-mini':              200_000,
+  'o1':                   200_000,
+  'o1-mini':              128_000,
+  'o1-preview':           128_000,
+  // OpenAI — GPT-4o family
+  'gpt-4o':               128_000,
+  'gpt-4o-mini':          128_000,
+  // OpenAI — Legacy
+  'gpt-4-turbo':          128_000,
+  'gpt-3.5-turbo':         16_385,
   // Gemini
   'gemini-3.1-pro-preview':         1_048_576,
   'gemini-2.5-pro-preview-05-06':   1_048_576,
@@ -41,8 +60,8 @@ const CONTEXT_WINDOWS: Record<string, number> = {
 // Cheapest/fastest model per provider for the summarization call
 const SUMMARY_MODELS: Record<string, string> = {
   anthropic: 'claude-haiku-4-5',
-  openai:    'gpt-4o-mini',
-  custom:    'gpt-4o-mini',
+  openai:    'gpt-4.1-nano',
+  custom:    'gpt-4.1-nano',
   gemini:    'gemini-2.0-flash-lite-001',
 }
 

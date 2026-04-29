@@ -15,6 +15,7 @@ import {
   SessionChangesPayload,
   DiffRequestPayload,
   DiffResponsePayload,
+  DiffAttachPayload,
   GitStatusSummary,
   UpdateStatusPayload,
   SemanticIndexStatusPayload,
@@ -27,10 +28,13 @@ import {
   CmdApprovalPayload,
   AgentPreset,
   McpServerConfig,
+  McpOAuthConfig,
+  McpOAuthToken,
   McpTool,
   JiraProject,
   JiraIssue,
-  LinearIssue
+  LinearIssue,
+  AuditResult,
 } from '../shared/types'
 
 const api = {
@@ -114,9 +118,27 @@ const api = {
   exportChat: (payload: ExportChatPayload): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(IPC.EXPORT_CHAT, payload),
 
+  // Clipboard — read image via Electron native clipboard (renderer File objects are unreliable)
+  clipboardReadImage: (): Promise<{ dataUrl: string; base64: string; size: number } | null> =>
+    ipcRenderer.invoke(IPC.CLIPBOARD_READ_IMAGE),
+
   // Folder picker
   pickFolder: (): Promise<{ path: string | null }> =>
     ipcRenderer.invoke(IPC.PICK_FOLDER),
+
+  // URL pre-fetch — fetches a URL via main-process net.fetch (bypasses CORS)
+  fetchUrlContent: (url: string): Promise<{
+    ok: boolean
+    content: string
+    error?: string
+  }> => ipcRenderer.invoke(IPC.URL_FETCH, url),
+
+  // OpenAI — fetch live model list from /v1/models (chat models only)
+  getOpenAIModels: (apiKey: string): Promise<{
+    ok: boolean
+    models: string[]
+    error?: string
+  }> => ipcRenderer.invoke(IPC.OPENAI_GET_MODELS, apiKey),
 
   // OpenRouter — fetch available models (sorted: free first, then paid alphabetically)
   getOpenRouterModels: (apiKey?: string): Promise<{
@@ -128,6 +150,9 @@ const api = {
   // Diff viewer — renderer listens for requests, sends back approval
   onDiffRequest: (callback: (payload: DiffRequestPayload) => void) => {
     ipcRenderer.on(IPC.DIFF_REQUEST, (_e, payload) => callback(payload))
+  },
+  onDiffAttach: (callback: (payload: DiffAttachPayload) => void) => {
+    ipcRenderer.on(IPC.DIFF_ATTACH, (_e, payload) => callback(payload))
   },
   respondDiff: (payload: DiffResponsePayload): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(IPC.DIFF_RESPONSE, payload),
@@ -144,6 +169,16 @@ const api = {
   // Git status for UI
   getGitStatus: (workspacePath: string): Promise<GitStatusSummary> =>
     ipcRenderer.invoke(IPC.GIT_STATUS_GET, workspacePath),
+
+  // Git commit helpers
+  gitStagedDiff: (workspacePath: string): Promise<{ ok: boolean; diff: string; error?: string }> =>
+    ipcRenderer.invoke(IPC.GIT_STAGED_DIFF, workspacePath),
+  gitStageAll: (workspacePath: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.GIT_STAGE_ALL, workspacePath),
+  gitGenerateMsg: (workspacePath: string, settings: import('../shared/types').AppSettings): Promise<{ ok: boolean; message?: string; error?: string }> =>
+    ipcRenderer.invoke(IPC.GIT_GENERATE_MSG, workspacePath, settings),
+  gitDoCommit: (workspacePath: string, message: string): Promise<{ ok: boolean; output: string }> =>
+    ipcRenderer.invoke(IPC.GIT_DO_COMMIT, workspacePath, message),
 
   // Terminal / PTY
   createTerminal: (workspacePath: string, cols: number, rows: number): Promise<{ sessionId: string; error?: string }> =>
@@ -257,6 +292,15 @@ const api = {
   writeWorkspaceFile: (workspacePath: string, relativePath: string, content: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke(IPC.WORKSPACE_WRITE_FILE, workspacePath, relativePath, content),
 
+  deleteWorkspaceFile: (workspacePath: string, relativePath: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.WORKSPACE_DELETE_FILE, workspacePath, relativePath),
+
+  renameWorkspaceFile: (workspacePath: string, oldRelPath: string, newRelPath: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.WORKSPACE_RENAME_FILE, workspacePath, oldRelPath, newRelPath),
+
+  newWorkspaceFolder: (workspacePath: string, relativePath: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.WORKSPACE_NEW_FOLDER, workspacePath, relativePath),
+
   // Custom tool plugins
   listPlugins: (workspacePath: string): Promise<{ name: string; description: string; file: string }[]> =>
     ipcRenderer.invoke(IPC.PLUGINS_LIST, workspacePath),
@@ -317,6 +361,22 @@ const api = {
     ipcRenderer.invoke(IPC.MCP_STOP_SERVER, id),
   listMcpServers: (configs: McpServerConfig[]): Promise<Array<McpServerConfig & { status: { ready: boolean; tools: number; error: string | null } }>> =>
     ipcRenderer.invoke(IPC.MCP_LIST_SERVERS, configs),
+
+  // MCP OAuth
+  startMcpOAuth: (oauthConfig: McpOAuthConfig): Promise<{ ok: boolean; token?: McpOAuthToken; error?: string }> =>
+    ipcRenderer.invoke(IPC.MCP_OAUTH_START, oauthConfig),
+  refreshMcpToken: (opts: { tokenUrl: string; clientId: string; clientSecret?: string; refreshToken: string }): Promise<{ ok: boolean; token?: McpOAuthToken; error?: string }> =>
+    ipcRenderer.invoke(IPC.MCP_OAUTH_REFRESH, opts),
+  revokeMcpToken: (clientId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.MCP_OAUTH_REVOKE, clientId),
+
+  // OpenAI OAuth (Sign in with OpenAI — uses ChatGPT subscription)
+  loginWithOpenAI: (): Promise<{ ok: boolean; token?: { accessToken: string; refreshToken?: string; expiresAt?: number; tokenType: string }; error?: string }> =>
+    ipcRenderer.invoke(IPC.OPENAI_OAUTH_LOGIN),
+  refreshOpenAIToken: (refreshToken: string): Promise<{ ok: boolean; token?: { accessToken: string; refreshToken?: string; expiresAt?: number; tokenType: string }; error?: string }> =>
+    ipcRenderer.invoke(IPC.OPENAI_OAUTH_REFRESH, refreshToken),
+  logoutOpenAI: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.OPENAI_OAUTH_LOGOUT),
 
   // RAG injection notification
   onRagInjected: (cb: (payload: { chunks: number }) => void) =>
@@ -387,6 +447,71 @@ const api = {
     ipcRenderer.invoke(IPC.LOG_GET_PATH),
   readLogs: (lines?: number): Promise<{ ok: boolean; entries: Array<{ ts: string; level: string; tag: string; msg: string; data?: unknown }>; error?: string }> =>
     ipcRenderer.invoke(IPC.LOG_READ, lines ?? 500),
+
+  // Database browser
+  dbQuery: (connStr: string, sql: string, workspacePath: string): Promise<{ ok: boolean; output: string }> =>
+    ipcRenderer.invoke(IPC.DB_QUERY, connStr, sql, workspacePath),
+  dbListTables: (connStr: string, workspacePath: string): Promise<{ ok: boolean; output: string }> =>
+    ipcRenderer.invoke(IPC.DB_LIST_TABLES, connStr, workspacePath),
+
+  // Inline code completions
+  completionRequest: (payload: { prefix: string; suffix: string; language: string; settings: import('../shared/types').AppSettings }): Promise<{ ok: boolean; text: string; error?: string }> =>
+    ipcRenderer.invoke(IPC.COMPLETION_REQUEST, payload),
+
+  // Test runner
+  testRun: (command: string, workspace: string, framework: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.TEST_RUN, command, workspace, framework),
+  testAbort: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.TEST_ABORT),
+  testWatchToggle: (enabled: boolean, workspace: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.TEST_WATCH_TOGGLE, enabled, workspace),
+  testDetectFrameworks: (workspace: string): Promise<Array<{ framework: string; command: string; label: string; icon: string }>> =>
+    ipcRenderer.invoke('test:detectFrameworks', workspace),
+  onTestChunk: (cb: (chunk: string) => void) =>
+    ipcRenderer.on(IPC.TEST_CHUNK, (_e, chunk) => cb(chunk)),
+  onTestDone: (cb: (result: unknown) => void) =>
+    ipcRenderer.on(IPC.TEST_DONE, (_e, result) => cb(result)),
+  onTestWatchFired: (cb: (file: string) => void) =>
+    ipcRenderer.on(IPC.TEST_WATCH_FIRED, (_e, file) => cb(file)),
+  removeTestListeners: () => {
+    ipcRenderer.removeAllListeners(IPC.TEST_CHUNK)
+    ipcRenderer.removeAllListeners(IPC.TEST_DONE)
+    ipcRenderer.removeAllListeners(IPC.TEST_WATCH_FIRED)
+  },
+  playwrightOpenReport: (workspace: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.PLAYWRIGHT_OPEN_REPORT, workspace),
+
+  // Docker manager
+  dockerCheck:           (): Promise<{ ok: boolean; version?: string; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_CHECK),
+  dockerListContainers:  (): Promise<{ ok: boolean; containers?: unknown[]; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_LIST_CONTAINERS),
+  dockerListImages:      (): Promise<{ ok: boolean; images?: unknown[]; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_LIST_IMAGES),
+  dockerListVolumes:     (): Promise<{ ok: boolean; volumes?: unknown[]; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_LIST_VOLUMES),
+  dockerContainerAction: (action: string, id: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_CONTAINER_ACTION, action, id),
+  dockerGetLogs:         (id: string, lines?: number): Promise<{ ok: boolean; logs?: string; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_GET_LOGS, id, lines),
+  dockerStreamLogs:      (id: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_STREAM_LOGS, id),
+  dockerStopLogs:        (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.DOCKER_STOP_LOGS, id),
+  dockerStats:           (id: string): Promise<{ ok: boolean; stats?: unknown; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_STATS, id),
+  dockerImageAction:     (action: string, id: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_IMAGE_ACTION, action, id),
+  dockerVolumeAction:    (action: string, name: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.DOCKER_VOLUME_ACTION, action, name),
+  onDockerLogChunk: (cb: (payload: { containerId: string; data: string }) => void) =>
+    ipcRenderer.on(IPC.DOCKER_LOG_CHUNK, (_e, payload) => cb(payload)),
+  removeDockerLogListeners: () =>
+    ipcRenderer.removeAllListeners(IPC.DOCKER_LOG_CHUNK),
+
+  // Dependency Audit
+  runDepAudit: (workspacePath: string): Promise<{ ok: boolean; result?: AuditResult; error?: string }> =>
+    ipcRenderer.invoke(IPC.DEP_AUDIT, workspacePath),
 }
 
 contextBridge.exposeInMainWorld('api', api)
