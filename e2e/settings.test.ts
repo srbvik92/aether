@@ -31,7 +31,10 @@ test.describe('Settings Panel', () => {
 
     await window.getByRole('button', { name: /Settings/i }).click()
 
-    // The new toggle UI should have both buttons
+    // Navigate to the System Prompt section in the left nav
+    await window.getByRole('button', { name: /System Prompt/i }).click()
+
+    // The toggle UI should have both buttons
     await expect(window.getByRole('button', { name: 'Default' })).toBeVisible({ timeout: 5_000 })
     await expect(window.getByRole('button', { name: 'Custom' })).toBeVisible()
   })
@@ -40,6 +43,9 @@ test.describe('Settings Panel', () => {
     await skipOnboarding(window)
 
     await window.getByRole('button', { name: /Settings/i }).click()
+
+    // Navigate to the System Prompt section in the left nav
+    await window.getByRole('button', { name: /System Prompt/i }).click()
 
     // Click Custom
     await window.getByRole('button', { name: 'Custom' }).click()
