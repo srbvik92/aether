@@ -439,7 +439,12 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
     try {
       const result = await window.api.loginWithOpenAI()
       if (result.ok && result.token) {
-        setForm(f => ({ ...f, openaiOAuth: result.token, apiKey: f.apiKey }))
+        const updated = { ...form, openaiOAuth: result.token }
+        setForm(updated)
+        // Auto-save immediately so ChatWindow sees the token without
+        // requiring the user to manually click Save first
+        await window.api.saveSettings(updated)
+        onSave(updated)
       } else {
         setOauthError(result.error ?? 'Sign-in failed')
       }

@@ -27,6 +27,13 @@ process.on('unhandledRejection', (reason) => {
 let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
+  // Resolve icon path — works both in dev and in packaged app
+  const iconPath = join(__dirname, '../../build',
+    process.platform === 'win32'  ? 'icon.ico'  :
+    process.platform === 'darwin' ? 'icon.icns' :
+    'icon.png'
+  )
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -41,6 +48,7 @@ function createWindow(): void {
       symbolColor: '#ffffff',
       height: 36
     },
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
