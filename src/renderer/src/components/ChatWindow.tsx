@@ -1801,7 +1801,12 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
   }
 
-  const noApiKey = settings.provider === 'gemini' ? !settings.vertexProjectId : !settings.apiKey
+  const hasValidOAuth = settings.provider === 'openai'
+    && !!settings.openaiOAuth?.accessToken
+    && (settings.openaiOAuth.expiresAt ?? Infinity) > Date.now()
+  const noApiKey = settings.provider === 'gemini'
+    ? !settings.vertexProjectId
+    : hasValidOAuth ? false : !settings.apiKey
   const canSend  = (input.trim().length > 0 || attachedFiles.length > 0 || mentionChips.length > 0 || attachedImages.length > 0) && !noApiKey
 
   // ── Quick action chips ────────────────────────────────────────────────────

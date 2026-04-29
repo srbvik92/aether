@@ -85,8 +85,7 @@
     "publish": {
       "provider": "github",
       "owner": "srbvik92",
-      "repo": "aether",
-      "private": true,
+      "repo": "aether-releases",
       "releaseType": "release"
     }
   },

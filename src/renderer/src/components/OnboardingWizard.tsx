@@ -170,16 +170,19 @@ function ProviderStep({
 // ── API Key ───────────────────────────────────────────────────────────────────
 function ApiKeyStep({
   provider, apiKey, baseUrl,
-  onKeyChange, onBaseUrlChange, onNext, onBack
+  onKeyChange, onBaseUrlChange, onNext, onBack, onOAuthDone
 }: {
   provider: string; apiKey: string; baseUrl: string
   onKeyChange: (k: string) => void; onBaseUrlChange: (u: string) => void
   onNext: () => void; onBack: () => void
+  onOAuthDone: (token: { accessToken: string; refreshToken?: string; expiresAt?: number; tokenType: string }) => void
 }) {
-  const [testing, setTesting]   = useState(false)
+  const [testing, setTesting]       = useState(false)
   const [testResult, setTestResult] = useState<'ok' | 'error' | null>(null)
-  const [testMsg, setTestMsg]   = useState('')
-  const [showKey, setShowKey]   = useState(false)
+  const [testMsg, setTestMsg]       = useState('')
+  const [showKey, setShowKey]       = useState(false)
+  const [oauthLoading, setOauthLoading] = useState(false)
+  const [oauthDone, setOauthDone]   = useState(false)
 
   const info = PROVIDER_INFO[provider as keyof typeof PROVIDER_INFO] ?? PROVIDER_INFO.custom
   const isCustom = provider === 'custom'
@@ -211,6 +214,29 @@ function ApiKeyStep({
     setTesting(false)
   }
 
+  const handleOAuth = async () => {
+    setOauthLoading(true)
+    try {
+      const result = await window.api.loginWithOpenAI()
+      if (result.ok && result.token) {
+        setOauthDone(true)
+        onOAuthDone(result.token)
+      } else {
+        setTestResult('error')
+        setTestMsg(result.error ?? 'Sign-in failed')
+      }
+    } catch (e) {
+      setTestResult('error')
+      setTestMsg(String(e))
+    }
+    setOauthLoading(false)
+  }
+
+  // For OpenAI, the Continue button is enabled if key is set OR OAuth is done
+  const canContinue = provider === 'openai'
+    ? (apiKey.trim().length > 0 || oauthDone)
+    : (isCustom || apiKey.trim().length > 0)
+
   return (
     <div className="flex flex-col gap-4">
       <div className="text-center">
@@ -222,6 +248,36 @@ function ApiKeyStep({
           </a>
         )}
       </div>
+
+      {/* OpenAI: show Sign in with ChatGPT as primary option */}
+      {provider === 'openai' && (
+        <div className="flex flex-col gap-2">
+          {oauthDone ? (
+            <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 text-sm font-medium">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+              Signed in with ChatGPT
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleOAuth}
+              disabled={oauthLoading}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#10a37f] hover:bg-[#0d8c6d] disabled:opacity-60 text-white font-semibold text-sm transition-colors shadow"
+            >
+              {oauthLoading
+                ? <><span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />Signing in…</>
+                : <><svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.676l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855l-5.843-3.369 2.02-1.168a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.402-.681zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z"/></svg>
+                  Sign in with ChatGPT</>
+              }
+            </button>
+          )}
+          <div className="flex items-center gap-2 text-xs text-gray-400">
+            <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+            <span>or use an API key</span>
+            <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+          </div>
+        </div>
+      )}
 
       {isCustom && (
         <div>
@@ -290,7 +346,7 @@ function ApiKeyStep({
         </button>
         <button
           onClick={onNext}
-          disabled={!apiKey.trim() && !isCustom}
+          disabled={!canContinue}
           className="flex-[2] py-2.5 rounded-xl bg-blue-500 text-white font-semibold text-sm hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           Continue →
@@ -402,6 +458,7 @@ export default function OnboardingWizard({ settings, onFinish }: Props) {
   const [apiKey,    setApiKey]    = useState(settings.apiKey ?? '')
   const [baseUrl,   setBaseUrl]   = useState(settings.baseUrl ?? '')
   const [workspace, setWorkspace] = useState(settings.workspacePath ?? '')
+  const [oauthToken, setOauthToken] = useState<{ accessToken: string; refreshToken?: string; expiresAt?: number; tokenType: string } | null>(null)
 
   const goNext = () => setStep(s => STEPS[STEPS.indexOf(s) + 1] ?? 'done')
   const goBack = () => setStep(s => STEPS[STEPS.indexOf(s) - 1] ?? 'welcome')
@@ -417,7 +474,8 @@ export default function OnboardingWizard({ settings, onFinish }: Props) {
       baseUrl:            baseUrl || settings.baseUrl,
       workspacePath:      workspace || settings.workspacePath,
       model:              defaultModel,
-      onboardingComplete: true
+      onboardingComplete: true,
+      ...(oauthToken ? { openaiOAuth: oauthToken } : {})
     }
     if (window.api) await window.api.saveSettings(updated)
     onFinish(updated)
@@ -446,6 +504,7 @@ export default function OnboardingWizard({ settings, onFinish }: Props) {
             provider={provider} apiKey={apiKey} baseUrl={baseUrl}
             onKeyChange={setApiKey} onBaseUrlChange={setBaseUrl}
             onNext={goNext} onBack={goBack}
+            onOAuthDone={setOauthToken}
           />
         )}
         {step === 'workspace' && <WorkspaceStep workspacePath={workspace} onPathChange={setWorkspace} onNext={goNext} onBack={goBack} />}
