@@ -315,10 +315,12 @@ describe('executeTool — web_search', () => {
     expect(result.output).toContain('requires a query')
   })
 
-  it('returns error when Brave API key is missing', async () => {
+  it('falls back to DuckDuckGo when Brave API key is missing', async () => {
+    // DDG scrape is attempted; in test environment net.fetch is mocked so it
+    // either returns results or fails — either way it should NOT mention Brave
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => '' })
     const result = await executeTool('web_search', { query: 'current time' }, tmpDir, undefined, undefined, '')
-    expect(result.isError).toBe(true)
-    expect(result.output).toContain('Brave Search API key')
+    expect(result.output).not.toContain('Brave Search API key')
   })
 
   it('returns error on Brave API HTTP error', async () => {
