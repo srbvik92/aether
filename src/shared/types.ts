@@ -460,6 +460,7 @@ export interface ChatMessage {
   rating?:      'up' | 'down'   // user thumbs up/down rating (AI messages only)
   agentMode?:   boolean          // true when this message was generated in Agent mode
   urlFetches?:  UrlFetch[]       // pre-fetched URL content (shown collapsed in UI, injected into AI context)
+  rateLimitRetry?: { secondsLeft: number; attempt: number; maxAttempts: number }  // countdown while retrying after rate limit
 }
 
 export type ConversationMode = 'code' | 'agent' | 'voice' | 'review' | 'pair'
@@ -535,6 +536,7 @@ export const IPC = {
   STREAM_CHUNK:       'stream:chunk',
   STREAM_DONE:        'stream:done',
   STREAM_ERROR:       'stream:error',
+  RATE_LIMIT_RETRY:   'rate-limit:retry',
   SET_TITLEBAR_THEME: 'window:setTitleBarTheme',
   EXPORT_CHAT:        'chat:export',
   PICK_FOLDER:            'dialog:pickFolder',
@@ -918,6 +920,13 @@ export interface StreamDonePayload {
 export interface StreamErrorPayload {
   conversationId: string
   error: string
+}
+
+export interface RateLimitRetryPayload {
+  conversationId: string
+  secondsLeft:    number   // current countdown value (counts down from waitSeconds to 1)
+  attempt:        number   // which retry attempt (1-based)
+  maxAttempts:    number
 }
 
 export interface ToolCallStartPayload {

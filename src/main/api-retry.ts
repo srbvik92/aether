@@ -6,12 +6,15 @@
 import { log } from './logger'
 
 export interface RetryOptions {
-  maxRetries?:   number   // default 3
-  baseDelay?:    number   // default 1000ms
-  maxDelay?:     number   // default 30000ms
-  retryOn429?:   boolean  // default true
-  retryOnError?: boolean  // default true
-  onRetry?:      (attempt: number, delay: number, error: unknown) => void
+  maxRetries?:    number   // default 3
+  baseDelay?:     number   // default 1000ms
+  maxDelay?:      number   // default 30000ms
+  retryOn429?:    boolean  // default true
+  retryOnError?:  boolean  // default true
+  onRetry?:       (attempt: number, delay: number, error: unknown) => void
+  /** Called once per second while waiting after a 429 rate-limit error.
+   *  secondsLeft counts down from the wait duration to 1. */
+  onCountdown?:   (secondsLeft: number, attempt: number, maxRetries: number) => void
 }
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 529])
@@ -64,7 +67,8 @@ export async function withRetry<T>(
     maxDelay     = 30_000,
     retryOn429   = true,
     retryOnError = true,
-    onRetry
+    onRetry,
+    onCountdown,
   } = options
 
   let lastError: unknown
@@ -97,7 +101,16 @@ export async function withRetry<T>(
 
       onRetry?.(attempt + 1, delay, error)
 
-      await new Promise(resolve => setTimeout(resolve, delay))
+      // For rate-limit errors, tick a per-second countdown so the UI can show a timer.
+      if (onCountdown && is429) {
+        const totalSecs = Math.max(1, Math.round(delay / 1000))
+        for (let s = totalSecs; s >= 1; s--) {
+          onCountdown(s, attempt + 1, maxRetries)
+          await new Promise(resolve => setTimeout(resolve, 1000))
+        }
+      } else {
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
     }
   }
 

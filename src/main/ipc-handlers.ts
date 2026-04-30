@@ -11,6 +11,7 @@ import {
   StreamChunkPayload,
   StreamDonePayload,
   StreamErrorPayload,
+  RateLimitRetryPayload,
   ExportChatPayload,
   ToolCallStartPayload,
   ToolCallResultPayload,
@@ -651,14 +652,25 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       }
     }
 
+    // ── Rate-limit countdown helper — sends per-second tick events to the UI ──
+    const makeRetryOpts = () => ({
+      maxRetries:  5,
+      baseDelay:   10_000,   // 10 s initial wait for rate limits
+      maxDelay:    60_000,
+      onCountdown: (secondsLeft: number, attempt: number, maxAttempts: number) => {
+        if (abort.signal.aborted) return
+        mainWindow.webContents.send(IPC.RATE_LIMIT_RETRY, {
+          conversationId, secondsLeft, attempt, maxAttempts
+        } as RateLimitRetryPayload)
+      },
+    })
+
     try {
       if (rawSettings.provider === 'anthropic') {
         await withRetry(() => runAnthropicAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
           abortSignal: abort.signal
-        }), { maxRetries: 2, onRetry: (attempt, delay) => {
-          onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
-        }})
+        }), makeRetryOpts())
       } else if (rawSettings.provider === 'openai' || rawSettings.provider === 'custom' || rawSettings.provider === 'nvidia' || rawSettings.provider === 'openrouter') {
         const remoteMcpServers = (rawSettings.mcpServers ?? []).filter(s => s.serverType === 'remote' && s.enabled)
         const oauthToken       = rawSettings.openaiOAuth
@@ -675,33 +687,25 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
             oauthToken.accountId,
             conversationId,
             { onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest, abortSignal: abort.signal }
-          ), { maxRetries: 2, onRetry: (attempt, delay) => {
-            onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
-          }})
+          ), makeRetryOpts())
         } else if (useResponsesApi) {
           // ── OpenAI Responses API with remote MCP servers ─────────────────
           await withRetry(() => runOpenAIResponsesLoop(trimmedMessages, settingsWithWorkspace, remoteMcpServers, {
             onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
             abortSignal: abort.signal
-          }), { maxRetries: 2, onRetry: (attempt, delay) => {
-            onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
-          }})
+          }), makeRetryOpts())
         } else {
           // ── Standard Chat Completions with API key ────────────────────────
           await withRetry(() => runOpenAIAgentLoop(trimmedMessages, settingsWithWorkspace, {
             onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
             abortSignal: abort.signal
-          }), { maxRetries: 2, onRetry: (attempt, delay) => {
-            onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
-          }})
+          }), makeRetryOpts())
         }
       } else if (rawSettings.provider === 'gemini') {
         await withRetry(() => runGeminiAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
           abortSignal: abort.signal
-        }), { maxRetries: 2, onRetry: (attempt, delay) => {
-          onTextChunk(`\n\n⚠️ API error — retrying (attempt ${attempt}, waiting ${Math.round(delay/1000)}s)...\n\n`)
-        }})
+        }), makeRetryOpts())
       } else {
         // Fallback: plain streaming for any future providers
         const client = new AIClient(rawSettings)

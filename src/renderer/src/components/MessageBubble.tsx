@@ -894,8 +894,23 @@ export default function MessageBubble({
                   {message.toolCalls!.map(tc => <ToolCallCard key={tc.id} call={tc} />)}
                 </div>
               )}
+              {/* Rate-limit retry countdown banner */}
+              {message.rateLimitRetry && (
+                <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-300">
+                  <svg className="w-3.5 h-3.5 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  </svg>
+                  <span>
+                    Rate limited — retrying in <strong>{message.rateLimitRetry.secondsLeft}s</strong>
+                    <span className="text-amber-600 dark:text-amber-400 ml-1">
+                      (attempt {message.rateLimitRetry.attempt}/{message.rateLimitRetry.maxAttempts})
+                    </span>
+                  </span>
+                </div>
+              )}
               {(message.content || message.isStreaming) && (
-                <div className={`prose-message ${message.isStreaming && !message.content ? 'streaming-cursor' : ''}`}>
+                <div className={`prose-message ${message.isStreaming && !message.content && !message.rateLimitRetry ? 'streaming-cursor' : ''}`}>
                   {message.content ? (
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}

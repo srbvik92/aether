@@ -7,6 +7,7 @@ import {
   StreamChunkPayload,
   StreamDonePayload,
   StreamErrorPayload,
+  RateLimitRetryPayload,
   ExportChatPayload,
   ToolCallStartPayload,
   ToolCallResultPayload,
@@ -74,6 +75,9 @@ const api = {
   },
   onStreamError: (callback: (payload: StreamErrorPayload) => void) => {
     ipcRenderer.on(IPC.STREAM_ERROR, (_e, payload) => callback(payload))
+  },
+  onRateLimitRetry: (callback: (payload: RateLimitRetryPayload) => void) => {
+    ipcRenderer.on(IPC.RATE_LIMIT_RETRY, (_e, payload) => callback(payload))
   },
 
   // Tool call listeners

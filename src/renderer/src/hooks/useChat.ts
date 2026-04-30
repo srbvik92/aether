@@ -7,6 +7,7 @@ import {
   StreamChunkPayload,
   StreamDonePayload,
   StreamErrorPayload,
+  RateLimitRetryPayload,
   ToolCallStartPayload,
   ToolCallResultPayload,
   ToolOutputChunkPayload,
@@ -157,12 +158,24 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
   useEffect(() => {
     const ok = (id: string) => id === activeConvIdRef.current
 
-    // Text chunk
+    // Text chunk — also clears any rate-limit countdown (retry succeeded)
     window.api.onStreamChunk((payload: StreamChunkPayload) => {
       if (!ok(payload.conversationId)) return
       setIsCompressing(false)
       setMessages(prev => prev.map(m =>
-        m.id === streamingIdRef.current ? { ...m, content: m.content + payload.chunk } : m
+        m.id === streamingIdRef.current
+          ? { ...m, content: m.content + payload.chunk, rateLimitRetry: undefined }
+          : m
+      ))
+    })
+
+    // Rate-limit countdown — updates the streaming bubble with seconds remaining
+    window.api.onRateLimitRetry((payload: RateLimitRetryPayload) => {
+      if (!ok(payload.conversationId)) return
+      setMessages(prev => prev.map(m =>
+        m.id === streamingIdRef.current
+          ? { ...m, rateLimitRetry: { secondsLeft: payload.secondsLeft, attempt: payload.attempt, maxAttempts: payload.maxAttempts } }
+          : m
       ))
     })
 
@@ -173,8 +186,8 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       setIsCompressing(false)
       setMessages(prev => {
         const updated = prev.map(m => {
-          if (m.id === streamingIdRef.current) return { ...m, isStreaming: false }
-          if (m.isStreaming) return { ...m, isStreaming: false }
+          if (m.id === streamingIdRef.current) return { ...m, isStreaming: false, rateLimitRetry: undefined }
+          if (m.isStreaming) return { ...m, isStreaming: false, rateLimitRetry: undefined }
           return m
         })
         if (!autoTitledRef.current) {
@@ -442,7 +455,7 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
         setIsStreaming(false)
       }
     },
-    [messages, isStreaming, activeConvId, effectiveSettings]
+    [messages, isStreaming, activeConvId, effectiveSettings, workspacePath, conversation?.workspacePath]
   )
 
   // ── Edit (truncates history after the edited message, re-sends) ──────────
@@ -501,7 +514,7 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
         setIsStreaming(false)
       }
     },
-    [messages, isStreaming, activeConvId, effectiveSettings]
+    [messages, isStreaming, activeConvId, effectiveSettings, workspacePath, conversation?.workspacePath]
   )
 
   // ── Rate a message (👍/👎) ────────────────────────────────────────────────
