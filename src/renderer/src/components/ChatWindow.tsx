@@ -95,6 +95,11 @@ interface Props {
   initialScrollToMsgId?: string
   /** Called once ChatWindow has consumed initialScrollToMsgId */
   onScrollToMsgConsumed?: () => void
+  /** Auto-update state forwarded from App — rendered as a tiny chip in the title bar */
+  updateStatus?:     import('../../../shared/types').UpdateStatusPayload | null
+  onUpdateDownload?: () => void
+  onUpdateInstall?:  () => void
+  onUpdateDismiss?:  () => void
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -991,7 +996,8 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   { conversation, settings, onConversationUpdate, onSettingsUpdate, onNew, onOpenSearch, onOpenSettings,
     initialWorkspacePath, onWorkspacePathConsumed,
     initialAgentTask, onAgentTaskConsumed, onOpenEditor, onWorkspaceChange, onNavigateTo,
-    initialScrollToMsgId, onScrollToMsgConsumed }, ref
+    initialScrollToMsgId, onScrollToMsgConsumed,
+    updateStatus, onUpdateDownload, onUpdateInstall, onUpdateDismiss }, ref
 ) {
   const [input,           setInput]           = useState(() => {
     try { return localStorage.getItem(`draft-${conversation?.id ?? 'new'}`) ?? '' } catch { return '' }
@@ -1033,6 +1039,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   const [panelWidth,    setPanelWidth]    = useState(800)
   const [headerCompact, setHeaderCompact] = useState(false)  // mode-tab icons only
   const [headerMinimal, setHeaderMinimal] = useState(false)  // right toolbar → ⋯ overflow
+  const [showUpdateConfirm, setShowUpdateConfirm] = useState(false)
 
   useLayoutEffect(() => {
     const el = panelRef.current
@@ -1885,13 +1892,80 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      {/* Row 1 — drag handle (sits at same height as the native titlebar overlay, so keep it empty/clean) */}
+      {/* Row 1 — drag handle (same height as native titlebar overlay) */}
       <div
         className="h-9 flex items-center px-4 bg-white dark:bg-gray-950 flex-shrink-0"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
-        {/* intentionally empty — this row is purely a window-drag target */}
+        {/* Update available chip — sits in the drag row, no extra height consumed */}
+        {(updateStatus?.type === 'available' || updateStatus?.type === 'downloading' || updateStatus?.type === 'downloaded') && (
+          <div className="ml-auto flex items-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            {updateStatus.type === 'downloading' ? (
+              <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400">
+                <span className="w-2.5 h-2.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                Downloading… {'percent' in updateStatus ? `${updateStatus.percent}%` : ''}
+              </span>
+            ) : updateStatus.type === 'downloaded' ? (
+              <button
+                onClick={() => setShowUpdateConfirm(true)}
+                className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/60 transition-colors"
+              >
+                ✓ Ready to install v{updateStatus.version}
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowUpdateConfirm(true)}
+                className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/60 transition-colors"
+              >
+                ↑ Update v{updateStatus.version} available
+              </button>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Update confirmation dialog */}
+      {showUpdateConfirm && updateStatus && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 p-6 w-full max-w-sm mx-4">
+            <h2 className="text-base font-semibold text-gray-900 dark:text-white mb-2">
+              {updateStatus.type === 'downloaded' ? 'Install update now?' : 'Download update?'}
+            </h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-5">
+              {updateStatus.type === 'downloaded'
+                ? `v${'version' in updateStatus ? updateStatus.version : ''} is ready. The app will restart to apply the update. Make sure you're not in the middle of something important.`
+                : `v${'version' in updateStatus ? updateStatus.version : ''} is available. It will download in the background — you can keep working. The app will only restart when you choose to install.`
+              }
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowUpdateConfirm(false)}
+                className="flex-1 py-2 rounded-xl border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                Not now
+              </button>
+              <button
+                onClick={() => {
+                  setShowUpdateConfirm(false)
+                  if (updateStatus.type === 'downloaded') onUpdateInstall?.()
+                  else onUpdateDownload?.()
+                }}
+                className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
+              >
+                {updateStatus.type === 'downloaded' ? 'Restart & install' : 'Download'}
+              </button>
+            </div>
+            {updateStatus.type !== 'downloaded' && (
+              <button
+                onClick={() => { setShowUpdateConfirm(false); onUpdateDismiss?.() }}
+                className="w-full mt-2 py-1.5 text-xs text-gray-400 hover:text-gray-500 transition-colors"
+              >
+                Dismiss this update
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Row 2 — mode tabs (left) + toolbar (right) — responsive */}
       <div

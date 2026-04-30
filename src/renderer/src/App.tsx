@@ -715,14 +715,6 @@ export default function App() {
       </ErrorBoundary>
 
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-        {/* Update notification banner */}
-        <UpdateBanner
-          status={updateStatus}
-          onDownload={() => isElectron && window.api.downloadUpdate()}
-          onInstall={() => isElectron && window.api.installUpdate()}
-          onDismiss={() => setUpdateStatus(null)}
-        />
-
         {view === 'compare' ? (
           /* ── Multi-model comparison view ── */
           <ErrorBoundary name="Compare View">
@@ -766,6 +758,10 @@ export default function App() {
                     onNavigateTo={(id) => navigateTo(id)}
                     initialScrollToMsgId={pendingScrollMsgId ?? undefined}
                     onScrollToMsgConsumed={() => setPendingScrollMsgId(null)}
+                    updateStatus={updateStatus}
+                    onUpdateDownload={() => isElectron && window.api.downloadUpdate()}
+                    onUpdateInstall={() => isElectron && window.api.installUpdate()}
+                    onUpdateDismiss={() => setUpdateStatus(null)}
                   />
                 </div>
 
