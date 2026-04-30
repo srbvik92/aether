@@ -676,15 +676,54 @@ export async function fetchPageContent(url: string): Promise<string | null> {
   }
 }
 
+/** DuckDuckGo HTML scrape — zero API key required, used as fallback */
+async function webSearchDDG(query: string): Promise<ToolResult> {
+  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
+  const response = await net.fetch(searchUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    signal: AbortSignal.timeout(10_000)
+  })
+  if (!response.ok) throw new Error(`DDG HTTP ${response.status}`)
+  const html = await response.text()
+
+  // Extract titles + redirect hrefs
+  const titleRe  = /<a\s+rel="nofollow"\s+class="result__a"\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+  const snippetRe = /<a\s+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
+
+  const titles:   Array<{ href: string; title: string }> = []
+  const snippets: string[] = []
+  let m: RegExpExecArray | null
+
+  while ((m = titleRe.exec(html))   !== null && titles.length   < 6) titles.push({ href: m[1], title: m[2].replace(/<[^>]+>/g, '').trim() })
+  while ((m = snippetRe.exec(html)) !== null && snippets.length < 6) snippets.push(m[1].replace(/<[^>]+>/g, '').trim())
+
+  const results = titles.slice(0, 5).map((t, i) => {
+    // Decode DDG redirect → real URL
+    const uddg = t.href.match(/[?&]uddg=([^&]+)/)
+    const url  = uddg ? decodeURIComponent(uddg[1]) : t.href
+    return { title: t.title, url, snippet: snippets[i] ?? '' }
+  }).filter(r => r.title && r.url)
+
+  if (results.length === 0) return { output: `No results found for: "${query}"`, isError: false }
+
+  const lines = results.map((r, i) =>
+    `${i + 1}. **${r.title}**\n   URL: ${r.url}\n   ${r.snippet}`
+  ).join('\n\n')
+  return { output: `Search results for "${query}" (via DuckDuckGo):\n\n${lines}`, isError: false }
+}
+
 async function webSearch(query: string, apiKey: string): Promise<ToolResult> {
   if (!query?.trim()) {
     return { output: 'web_search requires a query — the query argument was empty or missing.', isError: true }
   }
+
+  // No Brave key → fall back to DuckDuckGo (no API key required)
   if (!apiKey?.trim()) {
-    return {
-      output: 'Web search requires a Brave Search API key.\nAdd it in Settings → Web Search → Brave API Key.\nGet a free key at https://brave.com/search/api/ (2,000 queries/month free).',
-      isError: true
-    }
+    try { return await webSearchDDG(query) }
+    catch (e) { return { output: `Web search failed: ${String(e)}`, isError: true } }
   }
 
   try {
