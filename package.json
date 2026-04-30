@@ -1,6 +1,6 @@
 {
   "name": "aether",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Aether — AI desktop agent. BYOK, multi-provider, fully local.",
   "main": "out/main/index.js",
   "homepage": "./",
