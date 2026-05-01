@@ -54,6 +54,7 @@ import { runOpenAIAgentLoop } from './openai-agent-loop'
 import { runOpenAIResponsesLoop, hasValidRemoteMcp } from './openai-responses-loop'
 import { runOpenAICodexLoop } from './openai-codex-loop'
 import { runGeminiAgentLoop } from './gemini-agent-loop'
+import { runSubAgentsParallel } from './sub-agent-runner'
 import { isOpenAITokenValid } from './openai-auth'
 import { withRetry } from './api-retry'
 import { compressToContextWindow } from './context-manager'
@@ -727,11 +728,59 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     let turnUsage = { inputTokens: 0, outputTokens: 0 }
     const onUsage = (i: number, o: number) => { turnUsage.inputTokens += i; turnUsage.outputTokens += o }
 
+    // ── Parallel agents handler ───────────────────────────────────────────────
+    // Called by agent loops when the LLM invokes `run_parallel_agents`.
+    // Signals the UI to open the panel, runs sub-agents, and returns combined results.
+    const onParallelAgents = async (
+      tasks:   Array<{ id: string; prompt: string }>,
+      context: string | undefined
+    ): Promise<string> => {
+      const workspacePath = rawSettings.workspacePath ?? ''
+
+      // Tell the UI about all tasks upfront so the panel opens and shows pending cards
+      for (const task of tasks) {
+        mainWindow.webContents.send(IPC.PARALLEL_START, {
+          conversationId,
+          taskId: task.id,
+          title:  task.id,
+        } as ParallelStartPayload)
+      }
+
+      const results = await runSubAgentsParallel(
+        tasks,
+        context,
+        rawSettings,
+        workspacePath,
+        (taskId, chunk) => {
+          if (!abort.signal.aborted) {
+            mainWindow.webContents.send(IPC.PARALLEL_CHUNK, { conversationId, taskId, chunk } as ParallelChunkPayload)
+          }
+        },
+        (taskId, result) => {
+          if (!abort.signal.aborted) {
+            mainWindow.webContents.send(IPC.PARALLEL_DONE, { conversationId, taskId, fullText: result } as ParallelDonePayload)
+          }
+        },
+        (taskId, error) => {
+          if (!abort.signal.aborted) {
+            mainWindow.webContents.send(IPC.PARALLEL_ERROR, { conversationId, taskId, error } as ParallelErrorPayload)
+          }
+        },
+      )
+
+      // Combine results into a single tool-result string for the parent LLM
+      return results.map(r =>
+        r.error
+          ? `[${r.id}] ERROR: ${r.error}`
+          : `[${r.id}] RESULT:\n${r.result}`
+      ).join('\n\n---\n\n')
+    }
+
     try {
       if (rawSettings.provider === 'anthropic') {
         await withRetry(() => runAnthropicAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-          abortSignal: abort.signal, onUsage
+          abortSignal: abort.signal, onUsage, onParallelAgents
         }), makeRetryOpts())
       } else if (rawSettings.provider === 'openai' || rawSettings.provider === 'custom' || rawSettings.provider === 'nvidia' || rawSettings.provider === 'openrouter') {
         const remoteMcpServers = (rawSettings.mcpServers ?? []).filter(s => s.serverType === 'remote' && s.enabled)
@@ -760,13 +809,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
           // ── Standard Chat Completions with API key ────────────────────────
           await withRetry(() => runOpenAIAgentLoop(trimmedMessages, settingsWithWorkspace, {
             onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-            abortSignal: abort.signal, onUsage
+            abortSignal: abort.signal, onUsage, onParallelAgents
           }), makeRetryOpts())
         }
       } else if (rawSettings.provider === 'gemini') {
         await withRetry(() => runGeminiAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-          abortSignal: abort.signal, onUsage
+          abortSignal: abort.signal, onUsage, onParallelAgents
         }), makeRetryOpts())
       } else {
         // Fallback: plain streaming for any future providers

@@ -22,16 +22,25 @@ export function useParallelAgent(
   settings: AppSettings,
   workspacePath?: string,
 ) {
-  const [tasks,     setTasks]     = useState<TaskState[]>([])
-  const [isRunning, setIsRunning] = useState(false)
+  const [tasks,          setTasks]          = useState<TaskState[]>([])
+  const [isRunning,      setIsRunning]      = useState(false)
+  const [autoTriggered,  setAutoTriggered]  = useState(false)
 
   // Register IPC listeners once
   useEffect(() => {
     window.api.onParallelStart((p: ParallelStartPayload) => {
       if (p.conversationId !== conversationId) return
-      setTasks(prev =>
-        prev.map(t => (t.id === p.taskId ? { ...t, status: 'streaming' as const } : t)),
-      )
+      setTasks(prev => {
+        const existing = prev.find(t => t.id === p.taskId)
+        if (existing) {
+          // Manual run: task already exists, just move to streaming
+          return prev.map(t => (t.id === p.taskId ? { ...t, status: 'streaming' as const } : t))
+        }
+        // LLM-triggered: task doesn't exist yet — create it as streaming
+        setIsRunning(true)
+        setAutoTriggered(true)
+        return [...prev, { id: p.taskId, title: p.title, content: '', status: 'streaming' as const }]
+      })
     })
 
     window.api.onParallelChunk((p: ParallelChunkPayload) => {
@@ -101,7 +110,8 @@ export function useParallelAgent(
   const clear = useCallback(() => {
     setTasks([])
     setIsRunning(false)
+    setAutoTriggered(false)
   }, [])
 
-  return { tasks, isRunning, runParallel, abort, clear }
+  return { tasks, isRunning, autoTriggered, runParallel, abort, clear }
 }

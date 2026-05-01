@@ -36,6 +36,12 @@ import { log } from './logger'
 
 const MAX_ITERATIONS = 10   // fallback only — overridden by settings.maxIterations
 
+/** Callback invoked when the LLM calls `run_parallel_agents`. */
+export type ParallelAgentsFn = (
+  tasks:   Array<{ id: string; prompt: string }>,
+  context: string | undefined
+) => Promise<string>
+
 export interface GeminiAgentCallbacks {
   onTextChunk:       (text: string) => void
   onToolCallStart:   (callId: string, name: string, input: Record<string, unknown>) => void
@@ -44,6 +50,8 @@ export interface GeminiAgentCallbacks {
   onDiffRequest:     DiffApprovalFn
   abortSignal:       AbortSignal
   onUsage?:          (inputTokens: number, outputTokens: number) => void
+  /** When provided, intercepts `run_parallel_agents` tool calls. */
+  onParallelAgents?: ParallelAgentsFn
 }
 
 // ── Gemini function declarations ──────────────────────────────────────────────
@@ -347,6 +355,35 @@ const GEMINI_FUNCTIONS: FunctionDeclaration[] = [
       required: ['image', 'command']
     } as import('@google/genai').Schema
   },
+  {
+    name: 'run_parallel_agents',
+    description:
+      'Spawn 2–5 independent sub-agents to work on separate tasks simultaneously. ' +
+      'Use when you have multiple independent pieces of work. ' +
+      'Each sub-agent has full tool access. Results are returned when all agents complete.',
+    parameters: {
+      type: 'object' as unknown as import('@google/genai').Schema,
+      properties: {
+        tasks: {
+          type: 'array' as unknown as import('@google/genai').Type,
+          description: 'List of 2–5 independent tasks to run in parallel',
+          items: {
+            type: 'object' as unknown as import('@google/genai').Type,
+            properties: {
+              id:     { type: 'string' as unknown as import('@google/genai').Type, description: 'Short camelCase identifier' },
+              prompt: { type: 'string' as unknown as import('@google/genai').Type, description: 'Full self-contained instructions' }
+            },
+            required: ['id', 'prompt']
+          }
+        },
+        context: {
+          type: 'string' as unknown as import('@google/genai').Type,
+          description: 'Shared context for all sub-agents'
+        }
+      },
+      required: ['tasks']
+    } as import('@google/genai').Schema
+  },
 ]
 
 const GEMINI_TOOLS: Tool[] = [{ functionDeclarations: GEMINI_FUNCTIONS }]
@@ -357,6 +394,7 @@ const GEMINI_WS_TOOLS = new Set([
   'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit',
   'semantic_search', 'remember', 'write_plan', 'update_project_summary',
   'query_database',
+  'run_parallel_agents',
 ])
 
 function getGeminiFunctions(workspacePath: string): FunctionDeclaration[] {
@@ -585,7 +623,15 @@ export async function runGeminiAgentLoop(
 
       // Route MCP tools to callMcpTool; everything else to executeTool
       let result: { output: string; isError: boolean }
-      if (fc.name.startsWith('mcp__')) {
+      if (fc.name === 'run_parallel_agents' && callbacks.onParallelAgents) {
+        try {
+          const pInput = input as { tasks: Array<{ id: string; prompt: string }>; context?: string }
+          const combined = await callbacks.onParallelAgents(pInput.tasks ?? [], pInput.context)
+          result = { output: combined, isError: false }
+        } catch (err) {
+          result = { output: `run_parallel_agents failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        }
+      } else if (fc.name.startsWith('mcp__')) {
         const [, serverId, ...toolParts] = fc.name.split('__')
         const toolName = toolParts.join('__')
         const mcpResult = await callMcpTool(serverId, toolName, input)

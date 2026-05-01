@@ -1028,6 +1028,18 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   // Database browser
   const [dbBrowserOpen,       setDbBrowserOpen]       = useState(false)
   const [showParallelPanel,   setShowParallelPanel]   = useState(false)
+
+  // Auto-open parallel panel when the LLM triggers run_parallel_agents
+  useEffect(() => {
+    if (!isElectron) return
+    window.api.onParallelStart((p) => {
+      if (p.conversationId === (conversation?.id ?? 'new')) {
+        setShowParallelPanel(true)
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation?.id])
+
   // Live Preview
   const [showPreviewPanel,    setShowPreviewPanel]    = useState(false)
   // Test runner
@@ -1918,7 +1930,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
       >
         {/* Update available chip — sits in the drag row, no extra height consumed */}
         {(updateStatus?.type === 'available' || updateStatus?.type === 'downloading' || updateStatus?.type === 'downloaded') && (
-          <div className="ml-auto flex items-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <div className="ml-auto mr-[138px] flex items-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
             {updateStatus.type === 'downloading' ? (
               <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400">
                 <span className="w-2.5 h-2.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />

@@ -1925,6 +1925,38 @@ export const ANTHROPIC_TOOLS: Anthropic.Tool[] = [
       required: ['label']
     }
   },
+  {
+    name: 'run_parallel_agents',
+    description:
+      'Spawn 2–5 independent sub-agents to work on separate tasks simultaneously. ' +
+      'Use when you have multiple independent pieces of work (e.g. writing different files, ' +
+      'researching different topics, implementing different modules). ' +
+      'Each sub-agent has full tool access. Results are returned when all agents complete.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        tasks: {
+          type: 'array',
+          description: 'List of 2–5 independent tasks to run in parallel',
+          items: {
+            type: 'object',
+            properties: {
+              id:     { type: 'string', description: 'Short camelCase identifier, e.g. "writeTests"' },
+              prompt: { type: 'string', description: 'Full self-contained instructions for this sub-agent' }
+            },
+            required: ['id', 'prompt']
+          },
+          minItems: 2,
+          maxItems: 5
+        },
+        context: {
+          type: 'string',
+          description: 'Shared context for all sub-agents (project structure, constraints, etc.)'
+        }
+      },
+      required: ['tasks']
+    }
+  },
 ]
 
 // Tools that require a workspace folder — excluded from the AI's tool list when
@@ -1937,6 +1969,7 @@ const WORKSPACE_TOOL_NAMES = new Set([
   'query_database',
   'delete_file', 'rename_file', 'move_file',
   'run_tests', 'get_diagnostics', 'write_log', 'save_checkpoint',
+  'run_parallel_agents',
 ])
 
 /**

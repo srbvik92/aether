@@ -69,7 +69,7 @@ export default function ParallelAgentPanel({
   onClose,
 }: Props) {
   const [input, setInput] = useState('')
-  const { tasks, isRunning, runParallel, abort, clear } = useParallelAgent(
+  const { tasks, isRunning, autoTriggered, runParallel, abort, clear } = useParallelAgent(
     conversationId,
     settings,
     workspacePath,
@@ -126,8 +126,17 @@ export default function ParallelAgentPanel({
         </button>
       </div>
 
-      {/* Input area (shown when not running) */}
-      {tasks.length === 0 && (
+      {/* LLM-triggered banner */}
+      {autoTriggered && tasks.length > 0 && (
+        <div className="px-4 py-2 bg-purple-50 dark:bg-purple-950/30 border-b border-purple-200 dark:border-purple-800">
+          <p className="text-xs text-purple-700 dark:text-purple-300 font-medium">
+            AI spawned sub-agents automatically
+          </p>
+        </div>
+      )}
+
+      {/* Input area (shown when no tasks yet and not auto-triggered) */}
+      {tasks.length === 0 && !autoTriggered && (
         <div className="p-4 space-y-3">
           <p className="text-xs text-gray-500 dark:text-gray-400">
             Enter 2–4 independent tasks, one per line. Each runs as a separate AI agent

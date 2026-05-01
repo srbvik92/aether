@@ -33,6 +33,13 @@ const MAX_ITERATIONS = 10   // fallback only — overridden by settings.maxItera
 
 // ── Callback surface (main process → ipc-handlers) ────────────────────────────
 
+/** Callback invoked when the LLM calls `run_parallel_agents`.
+ *  Returns the combined result string to inject back as a tool result. */
+export type ParallelAgentsFn = (
+  tasks:   Array<{ id: string; prompt: string }>,
+  context: string | undefined
+) => Promise<string>
+
 export interface AgentCallbacks {
   onTextChunk:       (text: string) => void
   onToolCallStart:   (callId: string, name: string, input: Record<string, unknown>) => void
@@ -41,6 +48,8 @@ export interface AgentCallbacks {
   onDiffRequest:     DiffApprovalFn
   abortSignal:       AbortSignal
   onUsage?:          (inputTokens: number, outputTokens: number) => void
+  /** When provided, intercepts `run_parallel_agents` tool calls. */
+  onParallelAgents?: ParallelAgentsFn
 }
 
 // ── Message types used in the loop ───────────────────────────────────────────
@@ -230,7 +239,16 @@ export async function runAnthropicAgentLoop(
 
       // Route MCP tools to callMcpTool; everything else to executeTool
       let result: { output: string; isError: boolean }
-      if (toolBlock.name.startsWith('mcp__')) {
+      if (toolBlock.name === 'run_parallel_agents' && callbacks.onParallelAgents) {
+        // Delegate to the parallel-agent runner provided by ipc-handlers
+        try {
+          const pInput = input as { tasks: Array<{ id: string; prompt: string }>; context?: string }
+          const combined = await callbacks.onParallelAgents(pInput.tasks ?? [], pInput.context)
+          result = { output: combined, isError: false }
+        } catch (err) {
+          result = { output: `run_parallel_agents failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        }
+      } else if (toolBlock.name.startsWith('mcp__')) {
         const [, serverId, ...toolParts] = toolBlock.name.split('__')
         const toolName = toolParts.join('__')
         const mcpResult = await callMcpTool(serverId, toolName, input)
