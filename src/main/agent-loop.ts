@@ -40,6 +40,7 @@ export interface AgentCallbacks {
   onToolOutputChunk: (callId: string, chunk: string) => void
   onDiffRequest:     DiffApprovalFn
   abortSignal:       AbortSignal
+  onUsage?:          (inputTokens: number, outputTokens: number) => void
 }
 
 // ── Message types used in the loop ───────────────────────────────────────────
@@ -119,6 +120,8 @@ export async function runAnthropicAgentLoop(
   let consecutiveErrors = 0
   const MAX_CONSECUTIVE_ERRORS = 3
   const maxIter = Math.max(1, settings.maxIterations ?? MAX_ITERATIONS)
+  let totalInputTokens  = 0
+  let totalOutputTokens = 0
 
   for (let iteration = 0; iteration < maxIter; iteration++) {
     if (callbacks.abortSignal.aborted) break
@@ -199,6 +202,10 @@ export async function runAnthropicAgentLoop(
 
     // ── Get final message (includes full content blocks) ────────────────────
     const finalMsg = await stream.finalMessage()
+
+    // ── Accumulate token usage ───────────────────────────────────────────────
+    totalInputTokens  += finalMsg.usage?.input_tokens  ?? 0
+    totalOutputTokens += finalMsg.usage?.output_tokens ?? 0
 
     // ── Check if there are any tool calls ──────────────────────────────────
     const toolUseBlocks = finalMsg.content.filter(
@@ -305,5 +312,6 @@ export async function runAnthropicAgentLoop(
     ]
   }
 
+  callbacks.onUsage?.(totalInputTokens, totalOutputTokens)
   return fullText
 }

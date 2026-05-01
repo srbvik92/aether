@@ -386,6 +386,218 @@ function searchFiles(pattern: string, searchPath: string, workspace: string): To
   return { output: cap(header + results.join('\n')), isError: false }
 }
 
+// ── run_tests ─────────────────────────────────────────────────────────────────
+/** Auto-detects the project's test framework and runs it, returning a
+ *  structured summary (pass/fail counts + first few failure messages). */
+async function runTests(workspace: string, onChunk?: (chunk: string) => void, callId?: string): Promise<ToolResult> {
+  if (!workspace) return { output: 'No workspace set — cannot run tests.', isError: true }
+
+  // Detect test command from common config files
+  let testCmd = ''
+  try {
+    const pkgPath = join(workspace, 'package.json')
+    if (existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+      if (pkg.scripts?.test && !pkg.scripts.test.startsWith('echo')) {
+        testCmd = process.platform === 'win32' ? 'npm test -- --reporter=verbose 2>&1' : 'npm test -- --reporter=verbose 2>&1'
+        // Use CI=true to suppress watch mode prompts
+        testCmd = `CI=true npm test`
+        if (process.platform === 'win32') testCmd = `$env:CI="true"; npm test`
+      }
+    }
+  } catch { /* fall through */ }
+
+  if (!testCmd) {
+    if (existsSync(join(workspace, 'pytest.ini')) || existsSync(join(workspace, 'pyproject.toml'))) {
+      testCmd = 'python -m pytest -v 2>&1'
+    } else if (existsSync(join(workspace, 'go.mod'))) {
+      testCmd = 'go test ./... -v 2>&1'
+    } else if (existsSync(join(workspace, 'Cargo.toml'))) {
+      testCmd = 'cargo test 2>&1'
+    }
+  }
+
+  if (!testCmd) {
+    return { output: 'Could not detect a test framework. Add a "test" script to package.json or use run_command directly.', isError: true }
+  }
+
+  // Run the test command and capture output
+  const raw = await runCommandImpl(testCmd, workspace, onChunk, callId)
+
+  // Parse summary line from common frameworks (vitest/jest/pytest/go test)
+  const out = raw.output
+  const lines = out.split('\n')
+
+  // Jest / Vitest summary: "Tests: 3 failed, 12 passed"
+  const jestSummary = lines.find(l => /Tests?:.*passed|Tests?:.*failed/i.test(l))
+  // pytest summary: "5 passed, 2 failed"
+  const pytestSummary = lines.find(l => /\d+ passed/.test(l) || /\d+ failed/.test(l))
+  // Go test: "ok  github.com/..."  or "FAIL github.com/..."
+  const goSummary = lines.filter(l => /^(ok|FAIL)\s/.test(l)).join('\n')
+
+  const summary = jestSummary ?? pytestSummary ?? goSummary ?? ''
+
+  // Extract failure blocks (lines containing FAIL / Error / ✕ / ×)
+  const failLines = lines.filter(l =>
+    /✕|✗|×|FAIL|FAILED|AssertionError|Error:|expected .* to|toBe|toEqual/i.test(l)
+  ).slice(0, 20)
+
+  // Persist results to .ai-logs/
+  try {
+    const logsDir = join(workspace, '.ai-logs')
+    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true })
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    writeFileSync(
+      join(logsDir, `test-${ts}.txt`),
+      `# Test run ${new Date().toISOString()}\n\nCommand: ${testCmd}\n\n${out}`,
+      'utf-8'
+    )
+  } catch { /* logging is best-effort */ }
+
+  const allPassed = !raw.isError && !/failed|FAIL|error/i.test(summary || out.slice(-500))
+  const statusLine = allPassed ? '✅ All tests passed.' : '❌ Some tests failed.'
+
+  return {
+    output: [
+      statusLine,
+      summary ? `\nSummary: ${summary.trim()}` : '',
+      failLines.length ? `\nFailures:\n${failLines.join('\n')}` : '',
+      `\nFull output saved to .ai-logs/`,
+      raw.isError ? `\n\nRaw output:\n${out.slice(-2000)}` : '',
+    ].join(''),
+    isError: raw.isError
+  }
+}
+
+// ── get_diagnostics ───────────────────────────────────────────────────────────
+async function getDiagnostics(workspace: string, onChunk?: (chunk: string) => void, callId?: string): Promise<ToolResult> {
+  if (!workspace) return { output: 'No workspace set.', isError: true }
+
+  const errors: string[] = []
+  const warnings: string[] = []
+
+  // ── TypeScript ─────────────────────────────────────────────────────────────
+  const tsconfigExists = existsSync(join(workspace, 'tsconfig.json'))
+  if (tsconfigExists) {
+    const tscResult = await runCommandImpl(
+      process.platform === 'win32' ? 'npx tsc --noEmit 2>&1' : 'npx tsc --noEmit 2>&1',
+      workspace, onChunk, callId
+    )
+    const tscLines = tscResult.output.split('\n')
+    // Parse lines like: src/foo.ts(10,5): error TS2345: message
+    const tscPattern = /^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$/
+    for (const line of tscLines) {
+      const m = line.match(tscPattern)
+      if (m) {
+        const [, file, lineNum, col, severity, code, message] = m
+        const entry = `${severity.toUpperCase()} ${code} ${file}:${lineNum}:${col} — ${message}`
+        if (severity === 'error') errors.push(entry)
+        else warnings.push(entry)
+      }
+    }
+  }
+
+  // ── ESLint ─────────────────────────────────────────────────────────────────
+  const eslintConfig = ['.eslintrc.js', '.eslintrc.cjs', '.eslintrc.json', '.eslintrc.yml', 'eslint.config.js', 'eslint.config.mjs']
+    .find(f => existsSync(join(workspace, f)))
+  if (eslintConfig) {
+    try {
+      const eslintResult = await runCommandImpl(
+        'npx eslint . --format json --max-warnings 50 2>/dev/null || npx eslint . --format json --max-warnings 50',
+        workspace, undefined, callId
+      )
+      // Try to parse JSON output
+      const jsonStart = eslintResult.output.indexOf('[')
+      if (jsonStart !== -1) {
+        const jsonStr = eslintResult.output.slice(jsonStart)
+        const parsed = JSON.parse(jsonStr) as Array<{ filePath: string; messages: Array<{ line: number; column: number; severity: number; message: string; ruleId: string | null }> }>
+        for (const file of parsed) {
+          for (const msg of file.messages) {
+            const rel = relative(workspace, file.filePath)
+            const severity = msg.severity === 2 ? 'error' : 'warning'
+            const entry = `${severity.toUpperCase()} ${msg.ruleId ?? 'eslint'} ${rel}:${msg.line}:${msg.column} — ${msg.message}`
+            if (severity === 'error') errors.push(entry)
+            else warnings.push(entry)
+          }
+        }
+      }
+    } catch { /* ESLint not available or no config — skip */ }
+  }
+
+  // ── Save to .ai-logs ───────────────────────────────────────────────────────
+  try {
+    const logsDir = join(workspace, '.ai-logs')
+    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true })
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    writeFileSync(join(logsDir, `diagnostics-${ts}.txt`),
+      `# Diagnostics ${new Date().toISOString()}\n\nErrors: ${errors.length}\nWarnings: ${warnings.length}\n\n${[...errors, ...warnings].join('\n')}`,
+      'utf-8'
+    )
+  } catch { /* best-effort */ }
+
+  if (errors.length === 0 && warnings.length === 0) {
+    return { output: '✅ No TypeScript errors or ESLint warnings found.', isError: false }
+  }
+
+  const lines = [
+    `Found ${errors.length} error(s), ${warnings.length} warning(s):`,
+    '',
+    ...(errors.length ? ['**Errors:**', ...errors.slice(0, 30)] : []),
+    ...(warnings.length ? ['', '**Warnings:**', ...warnings.slice(0, 20)] : []),
+    '',
+    errors.length > 30 ? `(${errors.length - 30} more errors — see .ai-logs/)` : '',
+  ].filter(l => l !== undefined)
+
+  return {
+    output: cap(lines.join('\n')),
+    isError: errors.length > 0
+  }
+}
+
+// ── write_log ─────────────────────────────────────────────────────────────────
+/** Appends a timestamped entry to .ai-logs/session.md. */
+function writeLog(message: string, workspace: string): ToolResult {
+  if (!workspace) return { output: 'No workspace set.', isError: true }
+  try {
+    const logsDir = join(workspace, '.ai-logs')
+    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true })
+    const logFile = join(logsDir, 'session.md')
+    const ts = new Date().toISOString()
+    const entry = `\n## ${ts}\n${message.trim()}\n`
+    const existing = existsSync(logFile) ? readFileSync(logFile, 'utf-8') : '# Agent Session Log\n'
+    writeFileSync(logFile, existing + entry, 'utf-8')
+    return { output: `Logged to .ai-logs/session.md`, isError: false }
+  } catch (err) {
+    return { output: `write_log failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+  }
+}
+
+// ── save_checkpoint ───────────────────────────────────────────────────────────
+/** Creates a git commit with an agent-authored message — a named milestone snapshot. */
+async function saveCheckpoint(label: string, workspace: string): Promise<ToolResult> {
+  if (!workspace) return { output: 'No workspace set.', isError: true }
+  try {
+    const { isGitRepo, gitAdd, gitCommit } = await import('./git')
+    if (!isGitRepo(workspace)) {
+      return { output: 'Workspace is not a git repo — checkpoint skipped.', isError: false }
+    }
+    const addResult = await gitAdd(['.'], workspace)
+    if (addResult.isError) return addResult
+    const msg = `[agent checkpoint] ${label.trim()}`
+    const result = await gitCommit(msg, workspace)
+    if (result.isError) {
+      // Nothing to commit is not an error
+      if (/nothing to commit/i.test(result.output)) {
+        return { output: `Checkpoint skipped — no changes since last commit. (${label})`, isError: false }
+      }
+      return result
+    }
+    return { output: `✅ Checkpoint saved: "${msg}"`, isError: false }
+  } catch (err) {
+    return { output: `save_checkpoint failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+  }
+}
+
 function runCommand(
   command: string,
   workspace: string,
@@ -1114,6 +1326,14 @@ export async function executeTool(
         return searchFiles(input.pattern as string, p || '.', workspacePath)
       case 'run_command':
         return runCommand(cmd, workspacePath, onOutputChunk, callId)
+      case 'run_tests':
+        return runTests(workspacePath, onOutputChunk, callId)
+      case 'get_diagnostics':
+        return getDiagnostics(workspacePath, onOutputChunk, callId)
+      case 'write_log':
+        return writeLog(input.message as string, workspacePath)
+      case 'save_checkpoint':
+        return saveCheckpoint((input.label ?? input.message ?? 'checkpoint') as string, workspacePath)
       case 'git_status':
         return toolGitStatus(workspacePath)
       case 'git_diff':
@@ -1644,6 +1864,67 @@ export const ANTHROPIC_TOOLS: Anthropic.Tool[] = [
       required: ['source_path', 'dest_path']
     }
   },
+  {
+    name: 'run_tests',
+    description:
+      'Auto-detect and run the project\'s test suite (Jest, Vitest, pytest, go test, cargo test). ' +
+      'Returns a structured summary: pass/fail counts, failed test names, and error messages. ' +
+      'Full output is saved to .ai-logs/. ' +
+      'ALWAYS call this after writing or editing code to verify correctness. ' +
+      'If tests fail, analyse the failures, fix the code, and call run_tests again — repeat until all pass.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'get_diagnostics',
+    description:
+      'Run the TypeScript compiler (tsc --noEmit) and ESLint to get all current type errors and lint warnings. ' +
+      'Returns a structured list of errors with file, line, and message. ' +
+      'ALWAYS call this after making TypeScript/JavaScript code changes to catch type errors immediately. ' +
+      'Fix all errors before proceeding to the next step.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'write_log',
+    description:
+      'Append a timestamped entry to .ai-logs/session.md. ' +
+      'Use this to document decisions, findings, test results, and milestones so there is a persistent session record. ' +
+      'Call at the start of a task, after each major step, and on completion.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        message: {
+          type: 'string',
+          description: 'The log entry text. Markdown is supported.'
+        }
+      },
+      required: ['message']
+    }
+  },
+  {
+    name: 'save_checkpoint',
+    description:
+      'Create a named git commit (a milestone snapshot). ' +
+      'Call this when the code reaches a significant milestone — e.g. all tests passing, feature complete, refactor done. ' +
+      'This gives the user a safe restore point. Requires the workspace to be a git repository.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Short description of the milestone, e.g. "all tests passing" or "auth feature complete"'
+        }
+      },
+      required: ['label']
+    }
+  },
 ]
 
 // Tools that require a workspace folder — excluded from the AI's tool list when
@@ -1655,6 +1936,7 @@ const WORKSPACE_TOOL_NAMES = new Set([
   'semantic_search', 'remember', 'write_plan', 'update_project_summary',
   'query_database',
   'delete_file', 'rename_file', 'move_file',
+  'run_tests', 'get_diagnostics', 'write_log', 'save_checkpoint',
 ])
 
 /**

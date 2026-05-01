@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import { ChatMessage } from '../../../shared/types'
+import CreatePrModal from './CreatePrModal'
 
 interface Task {
   done: boolean
@@ -19,6 +20,8 @@ interface Props {
   onPause: () => void
   onResume: () => void
   onStop: () => void
+  /** Workspace path — enables Create PR button when set */
+  workspacePath?: string
 }
 
 /** Parse all checkbox items from markdown content */
@@ -64,7 +67,8 @@ export default function AgentProgressPanel({
   isStreaming,
   onPause,
   onResume,
-  onStop
+  onStop,
+  workspacePath
 }: Props) {
   const tasks = useMemo(() => parseTasks(messages), [messages])
   const done = tasks.filter(t => t.done).length
@@ -72,6 +76,21 @@ export default function AgentProgressPanel({
   const pct = total > 0 ? Math.round((done / total) * 100) : 0
   const status = statusLabel(isStreaming, agentPaused, tasks, autoContinueCount)
   const isComplete = total > 0 && done === total
+
+  const [showPrModal, setShowPrModal] = useState(false)
+  const [prUrl,       setPrUrl]       = useState<string | null>(null)
+
+  const lastSummary = useMemo(() => {
+    const lastAI = [...messages].reverse().find(m => m.role === 'assistant' && !m.isStreaming)
+    return lastAI?.content ?? ''
+  }, [messages])
+
+  const prDefaultTitle = useMemo(() => {
+    const firstTask = tasks.find(t => t.done)
+    if (firstTask) return firstTask.label.slice(0, 72)
+    const line = lastSummary.split('\n').find(l => l.trim().length > 0) ?? ''
+    return ('Agent task: ' + line.replace(/^#+\s*/, '')).slice(0, 72)
+  }, [tasks, lastSummary])
 
   return (
     <div className="w-64 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col bg-gray-50 dark:bg-gray-900/50 text-xs">
@@ -187,6 +206,48 @@ export default function AgentProgressPanel({
           </button>
         )}
       </div>
+
+      {/* Create PR button — shown when complete and workspace is set */}
+      {isComplete && !isStreaming && workspacePath && (
+        <div className="px-3 py-2 border-t border-gray-200 dark:border-gray-800">
+          {prUrl ? (
+            <a
+              href={prUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 text-[11px] text-green-700 dark:text-green-400 hover:underline"
+            >
+              <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/>
+              </svg>
+              PR created: view on GitHub
+            </a>
+          ) : (
+            <button
+              onClick={() => setShowPrModal(true)}
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium text-[11px]"
+            >
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/>
+              </svg>
+              Create PR
+            </button>
+          )}
+        </div>
+      )}
+
+      {showPrModal && workspacePath && (
+        <CreatePrModal
+          workspacePath={workspacePath}
+          defaultTitle={prDefaultTitle}
+          defaultBody={lastSummary.slice(0, 2000)}
+          onClose={() => setShowPrModal(false)}
+          onCreated={(url) => {
+            setPrUrl(url)
+            setShowPrModal(false)
+          }}
+        />
+      )}
     </div>
   )
 }

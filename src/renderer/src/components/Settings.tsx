@@ -1941,6 +1941,33 @@ export default function Settings({ settings, onSave, onCancel }: Props) {
             </div>
           </section>
 
+          {/* ── YOLO Mode ────────────────────────────────────────────── */}
+          <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
+            <label className={labelCls}>YOLO Mode</label>
+            <p className={`${hintCls} mb-3`}>
+              Skip ALL confirmations — file writes and commands run instantly without approval. Use with trusted agents only.
+            </p>
+            <div className="flex items-start justify-between gap-4 mb-3">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, yoloMode: !f.yoloMode }))}
+                  className={`flex-shrink-0 w-10 h-5 rounded-full transition-colors relative ${form.yoloMode ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                >
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${form.yoloMode ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </button>
+                <span className={`text-sm font-medium ${form.yoloMode ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                  {form.yoloMode ? 'On — no approvals required' : 'Off — approvals apply normally'}
+                </span>
+              </div>
+              {form.yoloMode && (
+                <span className="flex-shrink-0 text-xs font-bold px-2 py-0.5 rounded bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800">
+                  DANGER
+                </span>
+              )}
+            </div>
+          </section>
+
           {/* ── Edit Approval ────────────────────────────────────────── */}
           <section className="mb-6 border-t border-gray-200 dark:border-gray-800 pt-6">
             <label className={labelCls}>File Edit Approval</label>

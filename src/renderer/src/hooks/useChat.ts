@@ -186,7 +186,12 @@ export function useChat({ conversation, settings, onConversationUpdate, mode = '
       setIsCompressing(false)
       setMessages(prev => {
         const updated = prev.map(m => {
-          if (m.id === streamingIdRef.current) return { ...m, isStreaming: false, rateLimitRetry: undefined }
+          if (m.id === streamingIdRef.current) return {
+            ...m,
+            isStreaming: false,
+            rateLimitRetry: undefined,
+            ...(payload.usage ? { tokenUsage: payload.usage } : {})
+          }
           if (m.isStreaming) return { ...m, isStreaming: false, rateLimitRetry: undefined }
           return m
         })

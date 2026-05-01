@@ -22,7 +22,9 @@ import type {
   SemanticSearchResult,
   JiraProject,
   JiraIssue,
-  LinearIssue
+  LinearIssue,
+  CreatePrPayload,
+  CreatePrResult
 } from '../../shared/types'
 
 declare global {
@@ -100,6 +102,10 @@ declare global {
       // Linear integration
       linearListIssues:      (token: string) => Promise<{ ok: boolean; issues?: LinearIssue[]; error?: string }>
       linearCreateIssue:     (token: string, payload: { teamId: string; title: string; description: string; priority: number }) => Promise<{ ok: boolean; identifier?: string; error?: string }>
+      // PR creation via gh CLI
+      createPr:              (payload: CreatePrPayload) => Promise<CreatePrResult>
+      // Live diagnostics
+      getDiagnostics:        (workspacePath: string) => Promise<{ errors: number; warnings: number; summary?: string }>
     }
   }
 }

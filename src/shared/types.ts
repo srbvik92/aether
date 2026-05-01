@@ -106,6 +106,11 @@ export interface AppSettings {
   // Dangerous commands (rm -rf, git reset --hard, etc.) always require approval.
   autoApproveCommands?: boolean
 
+  // ── YOLO mode ─────────────────────────────────────────────────────────────
+  // When true, ALL approval dialogs are bypassed — both file diff approvals
+  // and command approvals (including dangerous commands). Use with trusted agents only.
+  yoloMode?: boolean
+
   // ── Fast / lightweight model ──────────────────────────────────────────────
   // When set, lightweight tasks (auto-title, inline completions) use this
   // model instead of the primary model, saving cost and latency.
@@ -121,6 +126,10 @@ export interface AppSettings {
     testRunner?:       boolean   // Test Runner panel
     embeddedBrowser?:  boolean   // Embedded Browser with provider connectors
   }
+
+  // ── Structured output ─────────────────────────────────────────────────────
+  structuredOutput?: boolean       // force JSON response
+  outputSchema?:     string        // JSON schema string (optional — just json_object if empty)
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -461,6 +470,7 @@ export interface ChatMessage {
   agentMode?:   boolean          // true when this message was generated in Agent mode
   urlFetches?:  UrlFetch[]       // pre-fetched URL content (shown collapsed in UI, injected into AI context)
   rateLimitRetry?: { secondsLeft: number; attempt: number; maxAttempts: number }  // countdown while retrying after rate limit
+  tokenUsage?: { inputTokens: number; outputTokens: number; estimatedCost?: number }  // token counts + cost for this AI turn
 }
 
 export type ConversationMode = 'code' | 'agent' | 'voice' | 'review' | 'pair'
@@ -719,6 +729,10 @@ export const IPC = {
   GIT_STAGE_ALL:          'git:stageAll',           // invoke — git add -A
   // Clipboard
   CLIPBOARD_READ_IMAGE:   'clipboard:readImage',    // invoke — read image from clipboard as base64
+  // PR creation via gh CLI
+  CREATE_PR:              'pr:create',
+  // Live diagnostics (TypeScript + ESLint)
+  GET_DIAGNOSTICS:        'diagnostics:get',
 } as const
 
 // ── Docker types ──────────────────────────────────────────────────────────────
@@ -915,6 +929,7 @@ export interface StreamChunkPayload {
 export interface StreamDonePayload {
   conversationId: string
   fullText: string
+  usage?: { inputTokens: number; outputTokens: number; estimatedCost?: number }
 }
 
 export interface StreamErrorPayload {
@@ -1073,4 +1088,17 @@ export interface LinearIssue {
   assignee:    string | null
   url:         string
   createdAt:   string
+}
+
+export interface CreatePrPayload {
+  title:         string
+  body:          string
+  workspacePath: string
+  draft?:        boolean
+}
+
+export interface CreatePrResult {
+  ok:     boolean
+  url?:   string
+  error?: string
 }

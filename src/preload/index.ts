@@ -36,6 +36,8 @@ import {
   JiraIssue,
   LinearIssue,
   AuditResult,
+  CreatePrPayload,
+  CreatePrResult,
 } from '../shared/types'
 
 const api = {
@@ -516,6 +518,14 @@ const api = {
   // Dependency Audit
   runDepAudit: (workspacePath: string): Promise<{ ok: boolean; result?: AuditResult; error?: string }> =>
     ipcRenderer.invoke(IPC.DEP_AUDIT, workspacePath),
+
+  // PR creation via gh CLI
+  createPr: (payload: CreatePrPayload): Promise<CreatePrResult> =>
+    ipcRenderer.invoke(IPC.CREATE_PR, payload),
+
+  // Live diagnostics
+  getDiagnostics: (workspacePath: string): Promise<{ errors: number; warnings: number; summary?: string }> =>
+    ipcRenderer.invoke(IPC.GET_DIAGNOSTICS, workspacePath),
 }
 
 contextBridge.exposeInMainWorld('api', api)

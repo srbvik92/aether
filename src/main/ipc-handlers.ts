@@ -30,7 +30,9 @@ import {
   McpOAuthConfig,
   JiraProject,
   JiraIssue,
-  LinearIssue
+  LinearIssue,
+  CreatePrPayload,
+  CreatePrResult
 } from '../shared/types'
 import {
   getSettings,
@@ -167,6 +169,7 @@ function buildDiffApprovalFn(mainWindow: BrowserWindow, getCurrentCallId?: () =>
 
 const MEMORY_FILE  = '.ai-memory/notes.md'
 const SUMMARY_FILE = '.ai-context/PROJECT.md'
+const RULES_FILE   = '.ai-context/rules.md'
 
 // ── API error classifier ──────────────────────────────────────────────────────
 function classifyApiError(raw: string, model: string, provider: string): string {
@@ -223,6 +226,35 @@ function classifyApiError(raw: string, model: string, provider: string): string 
   return raw
 }
 
+// ── Token cost estimator ──────────────────────────────────────────────────────
+// Pricing per million tokens [inputCostPerM, outputCostPerM]
+const PRICING_TABLE: Array<{ match: string; input: number; output: number }> = [
+  // Anthropic
+  { match: 'claude-3-5-sonnet',  input: 3,     output: 15    },
+  { match: 'claude-3-5-haiku',   input: 0.80,  output: 4     },
+  { match: 'claude-3-opus',      input: 15,    output: 75    },
+  { match: 'claude-sonnet-4',    input: 3,     output: 15    },
+  { match: 'claude-haiku-4',     input: 0.80,  output: 4     },
+  // OpenAI
+  { match: 'gpt-4o-mini',        input: 0.15,  output: 0.60  },
+  { match: 'gpt-4o',             input: 2.50,  output: 10    },
+  { match: 'gpt-4-turbo',        input: 10,    output: 30    },
+  { match: 'o3-mini',            input: 1.10,  output: 4.40  },
+  { match: 'o1',                 input: 15,    output: 60    },
+  // Gemini
+  { match: 'gemini-1.5-pro',     input: 1.25,  output: 5     },
+  { match: 'gemini-1.5-flash',   input: 0.075, output: 0.30  },
+  { match: 'gemini-2.0-flash',   input: 0.10,  output: 0.40  },
+]
+
+function estimateCost(_provider: string, model: string, inputTokens: number, outputTokens: number): number {
+  const lower = model.toLowerCase()
+  const entry = PRICING_TABLE.find(p => lower.includes(p.match.toLowerCase()))
+  const inputCostPerM  = entry?.input  ?? 1
+  const outputCostPerM = entry?.output ?? 3
+  return (inputTokens / 1_000_000) * inputCostPerM + (outputTokens / 1_000_000) * outputCostPerM
+}
+
 // ── Webhook helper ────────────────────────────────────────────────────────────
 async function fireWebhook(url: string, payload: Record<string, unknown>): Promise<void> {
   const { default: https } = await import('https')
@@ -245,6 +277,14 @@ async function fireWebhook(url: string, payload: Record<string, unknown>): Promi
     req.write(body)
     req.end()
   })
+}
+
+function readRulesFile(workspacePath: string): string {
+  try {
+    const abs = join(workspacePath, RULES_FILE)
+    if (!existsSync(abs)) return ''
+    return readFileSync(abs, 'utf-8').trim()
+  } catch { return '' }
 }
 
 function readProjectMemory(workspacePath: string): string {
@@ -325,6 +365,7 @@ const OS_COMMAND_HINTS = OS_PLATFORM === 'win32'
 
 function injectWorkspaceContext(settings: AppSettings): AppSettings {
   const globalMemory   = readGlobalMemoryContent()
+  const rules          = settings.workspacePath ? readRulesFile(settings.workspacePath) : ''
   const memory         = settings.workspacePath ? readProjectMemory(settings.workspacePath) : ''
   const projectSummary = settings.workspacePath ? readProjectSummary(settings.workspacePath) : ''
   const fileSummary    = settings.workspacePath ? buildWorkspaceSummary(settings.workspacePath) : ''
@@ -369,7 +410,9 @@ function injectWorkspaceContext(settings: AppSettings): AppSettings {
   }
 
   if (!extra) return merged
-  return { ...merged, systemPrompt: merged.systemPrompt + extra }
+  merged = { ...merged, systemPrompt: merged.systemPrompt + extra }
+  if (rules) merged = { ...merged, systemPrompt: `## Project Rules\n\n${rules}\n\n` + merged.systemPrompt }
+  return merged
 }
 
 // ── Register all handlers ─────────────────────────────────────────────────────
@@ -508,9 +551,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     let currentCallId: string | null = null
 
     // Only show diff approval when the setting is enabled (default: true)
-    const onDiffRequest = rawSettings.requireEditApproval !== false
+    // YOLO mode overrides — bypass ALL approvals including dangerous commands
+    let onDiffRequest: DiffApprovalFn | undefined = rawSettings.requireEditApproval !== false
       ? buildDiffApprovalFn(mainWindow, () => currentCallId)
       : undefined
+
+    if (rawSettings.yoloMode) {
+      onDiffRequest = undefined   // no file diff approval
+      setCmdApprovalFn((_cmd: string, _workspace: string, _isDangerous: boolean): Promise<boolean> =>
+        Promise.resolve(true)    // all commands — even dangerous ones — auto-approved
+      )
+    }
 
     // Track all files written during this turn for the session change summary
     const sessionChangedFiles: ChangedFile[] = []
@@ -665,11 +716,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       },
     })
 
+    // ── Token usage accumulator for this turn ─────────────────────────────────
+    let turnUsage = { inputTokens: 0, outputTokens: 0 }
+    const onUsage = (i: number, o: number) => { turnUsage.inputTokens += i; turnUsage.outputTokens += o }
+
     try {
       if (rawSettings.provider === 'anthropic') {
         await withRetry(() => runAnthropicAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-          abortSignal: abort.signal
+          abortSignal: abort.signal, onUsage
         }), makeRetryOpts())
       } else if (rawSettings.provider === 'openai' || rawSettings.provider === 'custom' || rawSettings.provider === 'nvidia' || rawSettings.provider === 'openrouter') {
         const remoteMcpServers = (rawSettings.mcpServers ?? []).filter(s => s.serverType === 'remote' && s.enabled)
@@ -698,13 +753,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
           // ── Standard Chat Completions with API key ────────────────────────
           await withRetry(() => runOpenAIAgentLoop(trimmedMessages, settingsWithWorkspace, {
             onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-            abortSignal: abort.signal
+            abortSignal: abort.signal, onUsage
           }), makeRetryOpts())
         }
       } else if (rawSettings.provider === 'gemini') {
         await withRetry(() => runGeminiAgentLoop(trimmedMessages, settingsWithWorkspace, {
           onTextChunk, onToolCallStart, onToolCallResult, onToolOutputChunk, onDiffRequest,
-          abortSignal: abort.signal
+          abortSignal: abort.signal, onUsage
         }), makeRetryOpts())
       } else {
         // Fallback: plain streaming for any future providers
@@ -734,7 +789,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
             snapshotId: snapshotInfo?.fileCount ? snapshotInfo.id : undefined
           } as SessionChangesPayload)
         }
-        mainWindow.webContents.send(IPC.STREAM_DONE, { conversationId, fullText: '' } as StreamDonePayload)
+        const usagePayload = (turnUsage.inputTokens > 0 || turnUsage.outputTokens > 0)
+          ? {
+              inputTokens:   turnUsage.inputTokens,
+              outputTokens:  turnUsage.outputTokens,
+              estimatedCost: estimateCost(rawSettings.provider, rawSettings.model, turnUsage.inputTokens, turnUsage.outputTokens)
+            }
+          : undefined
+        mainWindow.webContents.send(IPC.STREAM_DONE, { conversationId, fullText: '', usage: usagePayload } as StreamDonePayload)
         trackMessage(rawSettings.provider, rawSettings.model, chatMode)
 
         // ── Webhook: fire on completion ─────────────────────────────────────
@@ -965,6 +1027,45 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       return result
     } catch (e) {
       return { ok: false, output: String(e) }
+    }
+  })
+
+  // ── PR creation via gh CLI ─────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.CREATE_PR, async (_e, payload: CreatePrPayload): Promise<CreatePrResult> => {
+    const { title, body, workspacePath, draft } = payload
+    try {
+      const { execSync } = require('child_process') as typeof import('child_process')
+      // Check gh CLI is available
+      try {
+        execSync('gh --version', { cwd: workspacePath, stdio: 'ignore' })
+      } catch {
+        return { ok: false, error: 'GitHub CLI (gh) is not installed. Install it from https://cli.github.com' }
+      }
+      // Push current branch to remote (set upstream if needed)
+      try {
+        execSync('git push -u origin HEAD', { cwd: workspacePath, stdio: 'pipe' })
+      } catch (pushErr) {
+        const msg = pushErr instanceof Error ? pushErr.message : String(pushErr)
+        if (!msg.includes('already exists') && !msg.includes('up-to-date')) {
+          return { ok: false, error: `git push failed: ${msg}` }
+        }
+      }
+      // Create the PR
+      const draftFlag = draft ? ' --draft' : ''
+      const safeTitle = title.replace(/"/g, '\\"').replace(/`/g, '\\`')
+      const safeBody  = body.replace(/"/g, '\\"').replace(/`/g, '\\`')
+      const output = execSync(
+        `gh pr create --title "${safeTitle}" --body "${safeBody}"${draftFlag}`,
+        { cwd: workspacePath, encoding: 'utf-8', stdio: 'pipe' }
+      )
+      const url = output.trim().split('\n').filter(l => l.startsWith('https://')).pop()
+                ?? output.trim().split('\n').pop()
+                ?? ''
+      return { ok: true, url }
+    } catch (err) {
+      const msg = err instanceof Error ? (err as NodeJS.ErrnoException & { stderr?: string | Buffer }).stderr?.toString() ?? err.message : String(err)
+      return { ok: false, error: msg.slice(0, 500) }
     }
   })
 
@@ -2734,6 +2835,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       return { ok: true, text: clean }
     } catch (e) {
       return { ok: false, text: '', error: String(e) }
+    }
+  })
+
+  // ── Live diagnostics ────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.GET_DIAGNOSTICS, async (_e, workspacePath: string) => {
+    if (!workspacePath) return { errors: 0, warnings: 0, items: [] }
+    try {
+      const result = await (await import('./tools')).executeTool('get_diagnostics', {}, workspacePath, undefined, undefined, undefined)
+      // Parse error/warning counts from output
+      const match = result.output.match(/Found (\d+) error\(s\), (\d+) warning\(s\)/)
+      if (match) return { errors: parseInt(match[1]), warnings: parseInt(match[2]), summary: result.output }
+      if (result.output.includes('✅')) return { errors: 0, warnings: 0, summary: result.output }
+      return { errors: 0, warnings: 0, summary: result.output }
+    } catch {
+      return { errors: 0, warnings: 0, summary: 'Could not run diagnostics' }
     }
   })
 }

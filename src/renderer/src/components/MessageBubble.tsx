@@ -202,6 +202,11 @@ function CodeBlock({ language, code, isDark }: { language: string; code: string;
   )
 }
 
+// ── Token count formatter ─────────────────────────────────────────────────────
+function formatTokens(n: number): string {
+  return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
+}
+
 // ── Tool icon by name ─────────────────────────────────────────────────────────
 export function toolIcon(name: string): string {
   switch (name) {
@@ -1036,6 +1041,16 @@ export default function MessageBubble({
               <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
             </svg>
             <span className="text-[11px] text-gray-400 dark:text-gray-500">stopped</span>
+          </div>
+        )}
+
+        {/* ── Token usage badge ── */}
+        {!isUser && message.tokenUsage && !message.isStreaming && (
+          <div className="flex justify-end mt-1.5 px-1">
+            <span className="text-[10px] text-gray-400 dark:text-gray-600 select-none">
+              {formatTokens(message.tokenUsage.inputTokens)}↑ {formatTokens(message.tokenUsage.outputTokens)}↓
+              {message.tokenUsage.estimatedCost !== undefined && ` · ~$${message.tokenUsage.estimatedCost.toFixed(4)}`}
+            </span>
           </div>
         )}
 

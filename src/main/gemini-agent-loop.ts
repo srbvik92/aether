@@ -43,6 +43,7 @@ export interface GeminiAgentCallbacks {
   onToolOutputChunk: (callId: string, chunk: string) => void
   onDiffRequest:     DiffApprovalFn
   abortSignal:       AbortSignal
+  onUsage?:          (inputTokens: number, outputTokens: number) => void
 }
 
 // ── Gemini function declarations ──────────────────────────────────────────────
@@ -471,6 +472,8 @@ export async function runGeminiAgentLoop(
   let contents: Content[] = toGeminiContents(messages)
 
   let fullText = ''
+  let totalInputTokens  = 0
+  let totalOutputTokens = 0
   const maxIter = Math.max(1, settings.maxIterations ?? MAX_ITERATIONS)
 
   for (let iteration = 0; iteration < maxIter; iteration++) {
@@ -506,6 +509,11 @@ export async function runGeminiAgentLoop(
           for (const p of parts) {
             if (p.functionCall) responseParts.push(p)
           }
+          // Accumulate usage from each chunk (last chunk contains totals)
+          if (chunk.usageMetadata) {
+            totalInputTokens  = chunk.usageMetadata.promptTokenCount     ?? totalInputTokens
+            totalOutputTokens = chunk.usageMetadata.candidatesTokenCount ?? totalOutputTokens
+          }
         }
 
         // If we got text with no function calls, we're done
@@ -526,6 +534,10 @@ export async function runGeminiAgentLoop(
             fullText     += p.text
           }
         }
+        if (result.usageMetadata) {
+          totalInputTokens  += result.usageMetadata.promptTokenCount     ?? 0
+          totalOutputTokens += result.usageMetadata.candidatesTokenCount ?? 0
+        }
       }
     } else {
       // ── Non-streaming for tool-call continuation turns ──────────────────────
@@ -538,6 +550,10 @@ export async function runGeminiAgentLoop(
           responseText += p.text
           fullText     += p.text
         }
+      }
+      if (result.usageMetadata) {
+        totalInputTokens  += result.usageMetadata.promptTokenCount     ?? 0
+        totalOutputTokens += result.usageMetadata.candidatesTokenCount ?? 0
       }
     }
 
@@ -620,6 +636,7 @@ export async function runGeminiAgentLoop(
     contents = [...contents, assistantTurn, toolResultTurn]
   }
 
+  callbacks.onUsage?.(totalInputTokens, totalOutputTokens)
   log.info('gemini', 'Agent loop complete', { totalChars: fullText.length })
   return fullText
 }

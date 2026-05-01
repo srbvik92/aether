@@ -19,6 +19,7 @@ import ContextTokenBar, { ContextCircle } from './ContextTokenBar'
 import ModeTabBar from './ModeTabBar'
 import AgentProgressPanel from './AgentProgressPanel'
 import AgentView from './AgentView'
+import DiagnosticsPanel from './DiagnosticsPanel'
 import ActivityPanel from './ActivityPanel'
 import VoiceRecorder from './VoiceRecorder'
 import ReviewPanel from './ReviewPanel'
@@ -1124,6 +1125,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
 
   const [mode, setMode] = useState<ConversationMode>(conversation?.mode ?? 'code')
   const [activityOpen, setActivityOpen] = useState(false)
+  const [resumeBannerDismissed, setResumeBannerDismissed] = useState(false)
 
   // ── Per-conversation workspace folder ────────────────────────────────────
   const safeWorkspace = (v: unknown): string | undefined =>
@@ -1187,6 +1189,7 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   // Sync mode when switching conversations
   useEffect(() => {
     setMode(conversation?.mode ?? 'code')
+    setResumeBannerDismissed(false)
   }, [conversation?.id])
 
   const {
@@ -1196,6 +1199,17 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   } = useChat({
     conversation, settings, onConversationUpdate, mode, workspacePath: convWorkspace
   })
+
+  const showResumeBanner = useMemo(() => {
+    if (isStreaming) return false
+    const lastMsg = messages[messages.length - 1]
+    if (!lastMsg || lastMsg.role !== 'assistant') return false
+    return !!(
+      lastMsg.agentMode &&
+      (lastMsg.error?.includes('Interrupted') || lastMsg.stopped) &&
+      !lastMsg.content.trim().includes('All tasks complete')
+    )
+  }, [messages, isStreaming])
 
   // Consume initialScrollToMsgId on mount
   useEffect(() => {
@@ -2184,17 +2198,22 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
       {/* Messages + Agent progress sidebar */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         {mode === 'agent' && messages.length > 0 ? (
-          <AgentView
-            messages={messages}
-            isStreaming={isStreaming}
-            autoContinueCount={autoContinueCount}
-            maxContinues={maxAutoContiues}
-            agentPaused={agentPaused}
-            onPause={pauseAgent}
-            onResume={resumeAgent}
-            onStop={abortStream}
-            onSendMessage={sendMessage}
-          />
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+            <AgentView
+              messages={messages}
+              isStreaming={isStreaming}
+              autoContinueCount={autoContinueCount}
+              maxContinues={maxAutoContiues}
+              agentPaused={agentPaused}
+              onPause={pauseAgent}
+              onResume={resumeAgent}
+              onStop={abortStream}
+              onSendMessage={sendMessage}
+            />
+            {convWorkspace && (
+              <DiagnosticsPanel workspacePath={convWorkspace} isDark={false} />
+            )}
+          </div>
         ) : (
           <div className="relative flex-1 min-h-0 flex flex-col">
             <div
@@ -2419,6 +2438,36 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
               [...messages].reverse().find(m => m.role === 'assistant' && !m.isStreaming)?.content
             }
           />
+        </div>
+      )}
+
+      {/* Session resume banner */}
+      {showResumeBanner && !resumeBannerDismissed && (
+        <div className="mx-4 mb-2 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 flex items-center gap-3">
+          <svg className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+          </svg>
+          <span className="text-xs text-amber-800 dark:text-amber-300 flex-1">
+            Agent session was interrupted. Resume from where it left off?
+          </span>
+          <button
+            onClick={() => {
+              setResumeBannerDismissed(true)
+              if (mode !== 'agent') handleModeChange('agent')
+              setTimeout(() => sendMessage('Continue the agent task from where you left off. Review the previous progress and resume the next uncompleted step.'), 100)
+            }}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white transition-colors"
+          >
+            Resume
+          </button>
+          <button
+            onClick={() => setResumeBannerDismissed(true)}
+            className="text-amber-500 hover:text-amber-700 dark:hover:text-amber-300"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
         </div>
       )}
 
@@ -2648,6 +2697,40 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
                   <rect x="3" y="3" width="18" height="18" rx="2"/><polyline points="9 9 9 15"/><polyline points="9 12 15 12"/>
                 </svg>
                 {!bottomCompact && <span>{settings.autoApproveCommands ? 'Auto-run cmds' : 'Approve cmds'}</span>}
+              </button>
+            )}
+
+            {/* YOLO mode toggle */}
+            {onSettingsUpdate && activeWorkspace && (
+              <button
+                onClick={() => onSettingsUpdate({ ...settings, yoloMode: !settings.yoloMode })}
+                title={settings.yoloMode ? 'YOLO: skip all approvals — click to restore safe mode' : 'Safe mode: require approvals — click for YOLO'}
+                className={`flex items-center gap-1 py-1 rounded-md text-xs font-medium transition-all border ${bottomCompact ? 'px-1.5' : 'px-2 gap-1.5'}
+                  ${settings.yoloMode
+                    ? 'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 hover:bg-red-100'
+                    : 'text-gray-500 dark:text-gray-400 bg-transparent border-transparent hover:bg-gray-100 dark:hover:bg-gray-800 hover:border-gray-200 dark:hover:border-gray-700'
+                  }`}
+              >
+                <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                </svg>
+                {!bottomCompact && <span>{settings.yoloMode ? 'YOLO' : 'Safe'}</span>}
+              </button>
+            )}
+
+            {/* Structured output toggle */}
+            {onSettingsUpdate && (
+              <button
+                onClick={() => onSettingsUpdate({ ...settings, structuredOutput: !settings.structuredOutput })}
+                title={settings.structuredOutput ? 'Structured JSON output ON — click to disable' : 'Enable structured JSON output'}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                  settings.structuredOutput
+                    ? 'bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-400 border border-violet-300 dark:border-violet-700'
+                    : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 border border-transparent'
+                }`}
+              >
+                <span className="font-mono text-[11px]">{'{}'}</span>
+                {!bottomCompact && <span>JSON</span>}
               </button>
             )}
           </div>

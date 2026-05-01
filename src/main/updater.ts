@@ -26,6 +26,7 @@ export function initUpdater(mainWindow: BrowserWindow): void {
   // ── Configuration ─────────────────────────────────────────────────────────
   autoUpdater.autoDownload        = false  // user decides when to download
   autoUpdater.autoInstallOnAppQuit = true  // install silently on normal quit after download
+  autoUpdater.allowPrerelease     = true  // allow x.x.x-a / x.x.x-beta style versions
 
   // Wire to app logger so update events appear in the log viewer
   autoUpdater.logger = {

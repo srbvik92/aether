@@ -35,6 +35,7 @@ export interface OpenAIAgentCallbacks {
   onToolOutputChunk: (callId: string, chunk: string) => void
   onDiffRequest:     DiffApprovalFn
   abortSignal:       AbortSignal
+  onUsage?:          (inputTokens: number, outputTokens: number) => void
 }
 
 // ── OpenAI tool definitions (mirrors ANTHROPIC_TOOLS format) ─────────────────
@@ -461,6 +462,8 @@ export async function runOpenAIAgentLoop(
   })
 
   let fullText = ''
+  let totalInputTokens  = 0
+  let totalOutputTokens = 0
   const maxIter = Math.max(1, settings.maxIterations ?? MAX_ITERATIONS)
 
   for (let iteration = 0; iteration < maxIter; iteration++) {
@@ -497,7 +500,8 @@ export async function runOpenAIAgentLoop(
       ],
       tool_choice: 'auto',
       messages:   history,
-      stream:     true
+      stream:     true,
+      stream_options: { include_usage: true }
     })
 
     // Accumulate streamed tool call deltas
@@ -532,6 +536,12 @@ export async function runOpenAIAgentLoop(
           if (tc.function?.name)    acc.name     = tc.function.name
           if (tc.function?.arguments) acc.argsJson += tc.function.arguments
         }
+      }
+
+      // Usage is sent in the final chunk when stream_options.include_usage is true
+      if (chunk.usage) {
+        totalInputTokens  += chunk.usage.prompt_tokens     ?? 0
+        totalOutputTokens += chunk.usage.completion_tokens ?? 0
       }
     }
 
@@ -610,5 +620,6 @@ export async function runOpenAIAgentLoop(
     history = [...history, ...toolResultMsgs]
   }
 
+  callbacks.onUsage?.(totalInputTokens, totalOutputTokens)
   return fullText
 }
