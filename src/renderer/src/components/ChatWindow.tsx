@@ -27,6 +27,8 @@ import PairModePanel from './PairModePanel'
 import DatabaseBrowserPanel from './DatabaseBrowserPanel'
 import TestRunnerPanel from './TestRunnerPanel'
 import SessionReplayPanel from './SessionReplayPanel'
+import ParallelAgentPanel from './ParallelAgentPanel'
+import LivePreviewPanel from './LivePreviewPanel'
 import SlashCommandMenu, { filterSlashCommands, SlashCommand } from './SlashCommandMenu'
 import { useChat } from '../hooks/useChat'
 import { estimateTokens, estimateCost, formatTokens, formatCost, hasKnownPricing, getContextWarning } from '../utils/tokenCost'
@@ -1024,7 +1026,10 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
   // Task queue
   const [queueOpen,       setQueueOpen]       = useState(false)
   // Database browser
-  const [dbBrowserOpen,   setDbBrowserOpen]   = useState(false)
+  const [dbBrowserOpen,       setDbBrowserOpen]       = useState(false)
+  const [showParallelPanel,   setShowParallelPanel]   = useState(false)
+  // Live Preview
+  const [showPreviewPanel,    setShowPreviewPanel]    = useState(false)
   // Test runner
   const [testRunnerOpen,  setTestRunnerOpen]  = useState(false)
   // Custom plugins
@@ -2733,6 +2738,44 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
                 {!bottomCompact && <span>JSON</span>}
               </button>
             )}
+
+            {/* Parallel agents toggle */}
+            <button
+              onClick={() => setShowParallelPanel(p => !p)}
+              title="Run tasks in parallel"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                showParallelPanel
+                  ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-400 border border-purple-300 dark:border-purple-700'
+                  : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 border border-transparent'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/>
+              </svg>
+              {!bottomCompact && <span>Parallel</span>}
+            </button>
+
+            {/* Live Preview toggle */}
+            <button
+              onClick={() => {
+                if (!convWorkspace) {
+                  alert('Set a workspace folder first to use Live Preview.')
+                  return
+                }
+                setShowPreviewPanel(p => !p)
+              }}
+              title="Live app preview"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                showPreviewPanel
+                  ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400 border border-blue-300 dark:border-blue-700'
+                  : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 border border-transparent'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3"/>
+              </svg>
+              {!bottomCompact && <span>Preview</span>}
+            </button>
           </div>
 
           {/* Center: quick action buttons — icon-only when compact */}
@@ -2938,6 +2981,30 @@ const ChatWindow = forwardRef<ChatWindowHandle, Props>(function ChatWindow(
             setScrollToMsgId(msgId)
           }}
         />
+      )}
+
+      {/* Parallel Agents panel — right-side drawer */}
+      {showParallelPanel && isElectron && (
+        <div className="absolute inset-y-0 right-0 z-30 flex flex-col shadow-2xl border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+          style={{ width: 480 }}>
+          <ParallelAgentPanel
+            conversationId={conversation?.id ?? 'new'}
+            settings={effectiveSettings}
+            workspacePath={convWorkspace}
+            onClose={() => setShowParallelPanel(false)}
+          />
+        </div>
+      )}
+
+      {/* Live Preview panel — right-side drawer */}
+      {showPreviewPanel && convWorkspace && isElectron && (
+        <div className="absolute inset-y-0 right-0 z-30 flex flex-col shadow-2xl border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+          style={{ width: 420 }}>
+          <LivePreviewPanel
+            workspacePath={convWorkspace}
+            onClose={() => setShowPreviewPanel(false)}
+          />
+        </div>
       )}
     </div>
   )

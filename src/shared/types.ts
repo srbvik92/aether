@@ -720,12 +720,25 @@ export const IPC = {
   // ── Inline code completions ───────────────────────────────────────────────
   COMPLETION_REQUEST:     'completion:request',     // invoke — AI inline completion for editor
 
+  // ── Dev server (Live Preview) ─────────────────────────────────────────────
+  DEV_SERVER_START:  'dev:start',
+  DEV_SERVER_STOP:   'dev:stop',
+  DEV_SERVER_LOG:    'dev:log',
+  DEV_SERVER_STATUS: 'dev:status',
+
   // ── Git commit helpers ────────────────────────────────────────────────────
   GIT_STAGED_DIFF:        'git:stagedDiff',         // invoke — get staged diff text
   GIT_GENERATE_MSG:       'git:generateMsg',        // invoke — AI-generate a commit message
   GIT_DO_COMMIT:          'git:doCommit',           // invoke — run git commit -m
   // URL pre-fetch (renderer → main, bypasses CORS via net.fetch)
   URL_FETCH:              'url:fetch',              // invoke — fetch URL, return cleaned text
+  // ── Parallel sub-agents ────────────────────────────────────────────────────
+  PARALLEL_START:         'parallel:start',
+  PARALLEL_CHUNK:         'parallel:chunk',
+  PARALLEL_DONE:          'parallel:done',
+  PARALLEL_ERROR:         'parallel:error',
+  PARALLEL_SEND:          'parallel:send',
+  PARALLEL_ABORT:         'parallel:abort',
   GIT_STAGE_ALL:          'git:stageAll',           // invoke — git add -A
   // Clipboard
   CLIPBOARD_READ_IMAGE:   'clipboard:readImage',    // invoke — read image from clipboard as base64
@@ -1101,4 +1114,64 @@ export interface CreatePrResult {
   ok:     boolean
   url?:   string
   error?: string
+}
+
+// ─── Parallel sub-agents ──────────────────────────────────────────────────────
+
+export interface ParallelTask {
+  id:     string
+  title:  string
+  prompt: string
+}
+
+export interface ParallelSendPayload {
+  conversationId: string
+  tasks:          ParallelTask[]
+  settings:       AppSettings
+  workspacePath?: string
+}
+
+export interface ParallelChunkPayload {
+  conversationId: string
+  taskId:         string
+  chunk:          string
+}
+
+export interface ParallelDonePayload {
+  conversationId: string
+  taskId:         string
+  fullText:       string
+}
+
+export interface ParallelErrorPayload {
+  conversationId: string
+  taskId:         string
+  error:          string
+}
+
+export interface ParallelStartPayload {
+  conversationId: string
+  taskId:         string
+  title:          string
+}
+
+// ─── Dev server / Live Preview ─────────────────────────────────────────────
+
+export type DevServerState = 'stopped' | 'starting' | 'running' | 'error'
+
+export interface DevServerStatusPayload {
+  state: DevServerState
+  url?:  string
+  port?: number
+  error?: string
+}
+
+export interface DevServerLogPayload {
+  line:     string
+  isError?: boolean
+}
+
+export interface StartDevServerPayload {
+  workspacePath: string
+  command?:      string   // optional override, defaults to auto-detected
 }

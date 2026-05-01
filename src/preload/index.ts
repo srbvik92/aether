@@ -38,6 +38,14 @@ import {
   AuditResult,
   CreatePrPayload,
   CreatePrResult,
+  ParallelSendPayload,
+  ParallelStartPayload,
+  ParallelChunkPayload,
+  ParallelDonePayload,
+  ParallelErrorPayload,
+  DevServerStatusPayload,
+  DevServerLogPayload,
+  StartDevServerPayload,
 } from '../shared/types'
 
 const api = {
@@ -526,6 +534,36 @@ const api = {
   // Live diagnostics
   getDiagnostics: (workspacePath: string): Promise<{ errors: number; warnings: number; summary?: string }> =>
     ipcRenderer.invoke(IPC.GET_DIAGNOSTICS, workspacePath),
+
+  // Parallel agent
+  sendParallel: (payload: ParallelSendPayload): Promise<void> =>
+    ipcRenderer.invoke(IPC.PARALLEL_SEND, payload),
+  abortParallel: (conversationId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.PARALLEL_ABORT, conversationId),
+  onParallelStart: (cb: (p: ParallelStartPayload) => void) => {
+    ipcRenderer.on(IPC.PARALLEL_START, (_e, p) => cb(p))
+  },
+  onParallelChunk: (cb: (p: ParallelChunkPayload) => void) => {
+    ipcRenderer.on(IPC.PARALLEL_CHUNK, (_e, p) => cb(p))
+  },
+  onParallelDone: (cb: (p: ParallelDonePayload) => void) => {
+    ipcRenderer.on(IPC.PARALLEL_DONE, (_e, p) => cb(p))
+  },
+  onParallelError: (cb: (p: ParallelErrorPayload) => void) => {
+    ipcRenderer.on(IPC.PARALLEL_ERROR, (_e, p) => cb(p))
+  },
+
+  // Dev server (Live Preview)
+  startDevServer: (payload: StartDevServerPayload): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.DEV_SERVER_START, payload),
+  stopDevServer: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.DEV_SERVER_STOP),
+  onDevServerStatus: (cb: (p: DevServerStatusPayload) => void) => {
+    ipcRenderer.on(IPC.DEV_SERVER_STATUS, (_e, p) => cb(p))
+  },
+  onDevServerLog: (cb: (p: DevServerLogPayload) => void) => {
+    ipcRenderer.on(IPC.DEV_SERVER_LOG, (_e, p) => cb(p))
+  },
 }
 
 contextBridge.exposeInMainWorld('api', api)

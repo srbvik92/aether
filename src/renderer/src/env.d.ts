@@ -24,7 +24,15 @@ import type {
   JiraIssue,
   LinearIssue,
   CreatePrPayload,
-  CreatePrResult
+  CreatePrResult,
+  ParallelSendPayload,
+  ParallelStartPayload,
+  ParallelChunkPayload,
+  ParallelDonePayload,
+  ParallelErrorPayload,
+  DevServerStatusPayload,
+  DevServerLogPayload,
+  StartDevServerPayload,
 } from '../../shared/types'
 
 declare global {
@@ -106,6 +114,18 @@ declare global {
       createPr:              (payload: CreatePrPayload) => Promise<CreatePrResult>
       // Live diagnostics
       getDiagnostics:        (workspacePath: string) => Promise<{ errors: number; warnings: number; summary?: string }>
+      // Parallel agent
+      sendParallel:          (payload: ParallelSendPayload) => Promise<void>
+      abortParallel:         (conversationId: string) => Promise<{ ok: boolean }>
+      onParallelStart:       (cb: (p: ParallelStartPayload) => void) => void
+      onParallelChunk:       (cb: (p: ParallelChunkPayload) => void) => void
+      onParallelDone:        (cb: (p: ParallelDonePayload) => void) => void
+      onParallelError:       (cb: (p: ParallelErrorPayload) => void) => void
+      // Dev server (Live Preview)
+      startDevServer:        (payload: StartDevServerPayload) => Promise<{ ok: boolean }>
+      stopDevServer:         () => Promise<{ ok: boolean }>
+      onDevServerStatus:     (cb: (p: DevServerStatusPayload) => void) => void
+      onDevServerLog:        (cb: (p: DevServerLogPayload) => void) => void
     }
   }
 }

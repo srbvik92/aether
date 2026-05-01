@@ -32,7 +32,13 @@ import {
   JiraIssue,
   LinearIssue,
   CreatePrPayload,
-  CreatePrResult
+  CreatePrResult,
+  ParallelSendPayload,
+  ParallelStartPayload,
+  ParallelChunkPayload,
+  ParallelDonePayload,
+  ParallelErrorPayload,
+  StartDevServerPayload
 } from '../shared/types'
 import {
   getSettings,
@@ -66,6 +72,7 @@ import {
 } from './semantic-search'
 import { startApiServer, stopApiServer, isApiServerRunning, getApiServerPort } from './http-api-server'
 import { startMcpServer, stopMcpServer, getMcpServerStatus } from './mcp-client'
+import { startDevServer, stopDevServer } from './dev-server'
 import { setCustomPlugins, CustomPlugin } from './tools'
 import {
   SemanticIndexStatusPayload, SaveEmbeddingsPayload, SemanticSearchResult
@@ -2851,6 +2858,78 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     } catch {
       return { errors: 0, warnings: 0, summary: 'Could not run diagnostics' }
     }
+  })
+
+  // ── Dev server (Live Preview) ─────────────────────────────────────────────
+  ipcMain.handle(IPC.DEV_SERVER_START, (_e, payload: StartDevServerPayload) => {
+    startDevServer(payload.workspacePath, payload.command)
+    return { ok: true }
+  })
+
+  ipcMain.handle(IPC.DEV_SERVER_STOP, () => {
+    stopDevServer()
+    return { ok: true }
+  })
+}
+
+// ── Parallel agent streams ─────────────────────────────────────────────────────
+const activeParallelStreams = new Map<string, AbortController>()
+
+export function registerParallelHandlers() {
+  ipcMain.handle(IPC.PARALLEL_SEND, async (_e, payload: ParallelSendPayload) => {
+    const { conversationId, tasks, settings: rawSettings, workspacePath } = payload
+    const mainWindow = BrowserWindow.getAllWindows()[0]
+    if (!mainWindow) return
+
+    // Cancel any existing parallel streams for this conversation
+    activeParallelStreams.get(conversationId)?.abort()
+    const abort = new AbortController()
+    activeParallelStreams.set(conversationId, abort)
+
+    const settingsWithPath: AppSettings = { ...rawSettings, workspacePath: workspacePath ?? '' }
+
+    // Run all tasks in parallel — each gets its own mini agent loop
+    await Promise.allSettled(tasks.map(async (task) => {
+      mainWindow.webContents.send(IPC.PARALLEL_START, {
+        conversationId, taskId: task.id, title: task.title
+      } as ParallelStartPayload)
+
+      const taskMessages = [{ role: 'user' as const, content: task.prompt }]
+
+      try {
+        const client = new AIClient(settingsWithPath)
+        let fullText = ''
+        for await (const chunk of client.streamMessage(taskMessages)) {
+          if (abort.signal.aborted) break
+          fullText += chunk
+          mainWindow.webContents.send(IPC.PARALLEL_CHUNK, {
+            conversationId, taskId: task.id, chunk
+          } as ParallelChunkPayload)
+        }
+        if (!abort.signal.aborted) {
+          mainWindow.webContents.send(IPC.PARALLEL_DONE, {
+            conversationId, taskId: task.id, fullText
+          } as ParallelDonePayload)
+        }
+      } catch (err) {
+        const error = classifyApiError(
+          err instanceof Error ? err.message : String(err),
+          settingsWithPath.model,
+          settingsWithPath.provider
+        )
+        mainWindow.webContents.send(IPC.PARALLEL_ERROR, {
+          conversationId, taskId: task.id, error
+        } as ParallelErrorPayload)
+      }
+    }))
+
+    activeParallelStreams.delete(conversationId)
+  })
+
+  ipcMain.handle(IPC.PARALLEL_ABORT, (_e, conversationId: string) => {
+    activeParallelStreams.get(conversationId)?.abort()
+    activeParallelStreams.delete(conversationId)
+    return { ok: true }
   })
 }
 

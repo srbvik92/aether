@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow, Menu } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { registerIpcHandlers } from './ipc-handlers'
+import { registerIpcHandlers, registerParallelHandlers } from './ipc-handlers'
 import { initUpdater } from './updater'
 import { initTelemetry, stopTelemetry } from './telemetry'
 
@@ -60,6 +60,7 @@ function createWindow(): void {
 
   // Register all IPC handlers
   registerIpcHandlers(mainWindow)
+  registerParallelHandlers()
 
   // Remove default menu
   Menu.setApplicationMenu(null)
